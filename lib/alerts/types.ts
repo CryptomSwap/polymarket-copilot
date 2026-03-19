@@ -1,6 +1,42 @@
 /**
  * Alert Engine v1 types. Deterministic, threshold-based portfolio and recommendation alerts.
+ * Feed types: unified alert feed (drift + engine) for UI consumption.
  */
+
+// --- Alert feed (merged drift + engine for GET /api/alerts/feed) ---
+
+export type AlertFeedSource = "drift" | "engine";
+
+export const ALERT_FEED_SEVERITIES = ["info", "warning", "critical"] as const;
+export type AlertFeedSeverity = (typeof ALERT_FEED_SEVERITIES)[number];
+
+/** Feed alert type: drift uses DriftAlert.alertType; engine uses IntelligenceFlagCode. */
+export type AlertFeedType =
+  | string
+  | "HIGH_CONCENTRATION"
+  | "NEAR_RESOLUTION_CLUSTER"
+  | "STALE_SYNC_CLUSTER"
+  | "UNRESOLVED_CATALOG_POSITIONS"
+  | "LARGE_LOSS"
+  | "LARGE_GAIN";
+
+export interface AlertFeedItem {
+  id: string;
+  type: AlertFeedType;
+  severity: AlertFeedSeverity;
+  title: string;
+  message: string;
+  source: AlertFeedSource;
+  /** When source is "drift", present. Used for resolve API. */
+  driftAlertId?: string | null;
+  entityRefs?: {
+    assetId?: string | null;
+    marketId?: string | null;
+    polymarketOrderId?: string | null;
+  };
+  createdAt: string;
+  asOf?: string;
+}
 
 export const COPILOT_ALERT_TYPES = [
   "CONCENTRATION_BREACH",

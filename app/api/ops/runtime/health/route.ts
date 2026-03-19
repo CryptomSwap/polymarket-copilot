@@ -37,9 +37,23 @@ export async function GET() {
         message: "Worker heartbeat has no runtimeHealth (start worker with USE_STREAM_RUNTIME=true)",
       });
     }
+    const health = runtimeHealth as Record<string, unknown>;
     return NextResponse.json({
       status: "ok",
       runtimeHealth,
+      /** Operator-facing: connection, heartbeat, dataFreshness, reconciliation, readiness, killSwitch, truthModel, executionContainment. */
+      operatorHealth: health?.operatorHealth ?? null,
+      /** Exchange-truth authority: freshness, timestamps, truthSourceBySubsystem. */
+      truthModelStatus: health?.truthModelStatus ?? null,
+      /** Execution failure containment: frozen assets, ambiguity counts, shouldDegradeRuntime, shouldForceCancelOnlyOrFrozen. */
+      executionContainment: (health?.operatorHealth as Record<string, unknown> | null)?.executionContainment ?? null,
+      /** Latency and data-integrity: stream/processing latencies, integrity counters. */
+      latencyAndIntegrity: health?.latencyAndIntegrity ?? null,
+      /** Market WS subscription coverage: desired vs subscribed, pending, churn. */
+      marketSubscriptionCoverage: health?.marketSubscriptionCoverage ?? null,
+      /** Effective operational mode and source (config, phase, guardrail). */
+      operatingMode: health?.operatingMode ?? null,
+      operatingModeSource: health?.operatingModeSource ?? null,
       lastSeenAt: heartbeat.lastSeenAt.toISOString(),
     });
   } catch (error) {

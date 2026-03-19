@@ -189,13 +189,14 @@ async function run(): Promise<void> {
       }
     });
 
-    feedUserFeedResultToRuntime(
+    await feedUserFeedResultToRuntime(
       {
         funderAddress: "f1",
         lifecycle: { kind: "fill", exchangeOrderId: "ex-full", at: new Date(), totalFilledSize: 5, avgPrice: 0.55 },
         positionFill: { funderAddress: "f1", assetId: "a-full", marketId: "m-full", outcome: "", side: "BUY", size: 5, price: 0.55, filledAt: new Date() },
+        exchangeFillId: null,
       },
-      { orderStore, lifecycleHandler }
+      { orderStore, lifecycleHandler, fillLedgerEnabled: false }
     );
 
     check(orderStore.get("ord-full")?.status === "filled", "order filled via lifecycle (user-feed TRADE path)");

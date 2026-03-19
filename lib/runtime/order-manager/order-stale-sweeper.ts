@@ -11,6 +11,8 @@ import type { OrderIntent } from "./order-manager";
 import type { RuntimeOrderState } from "./order-manager";
 import type { OrderLifecycleStore } from "./order-lifecycle-store";
 import type { OrderLifecycleHandler } from "./order-lifecycle-handler";
+import type { AppendOrderLifecycleEventParams } from "../journal/order-lifecycle-journal";
+import { ORDER_LIFECYCLE_EVENT_TYPES } from "../journal/order-lifecycle-journal";
 
 export type StaleReason =
   | "pending_submit_no_ack"
@@ -60,6 +62,8 @@ export interface DefaultOrderStaleSweeperOptions {
   config?: OrderStaleSweeperConfig;
   /** Optional: return current intents for "far from desired posture" check. */
   getDesiredIntents?(): OrderIntent[];
+  /** When set, stale_detected is journaled for each stale order. */
+  journalAppend?: (params: AppendOrderLifecycleEventParams) => void | Promise<void>;
 }
 
 /**
@@ -70,12 +74,14 @@ export class DefaultOrderStaleSweeper implements OrderStaleSweeper {
   private readonly store: OrderLifecycleStore;
   private readonly eventBus?: RuntimeEventBus;
   private readonly lifecycleHandler?: OrderLifecycleHandler;
+  private readonly journalAppend?: (params: AppendOrderLifecycleEventParams) => void | Promise<void>;
   private readonly config: Required<OrderStaleSweeperConfig>;
 
   constructor(options: DefaultOrderStaleSweeperOptions) {
     this.store = options.store;
     this.eventBus = options.eventBus;
     this.lifecycleHandler = options.lifecycleHandler;
+    this.journalAppend = options.journalAppend;
     this.config = {
       pendingSubmitAckThresholdMs: options.config?.pendingSubmitAckThresholdMs ?? DEFAULT_PENDING_ACK_MS,
       workingStaleMs: options.config?.workingStaleMs ?? DEFAULT_WORKING_STALE_MS,
@@ -177,6 +183,20 @@ export class DefaultOrderStaleSweeper implements OrderStaleSweeper {
     const at = now;
 
     for (const r of recs) {
+      if (this.journalAppend) {
+        void this.journalAppend({
+          funderAddress: r.order.funderAddress,
+          clientOrderId: r.order.clientOrderId,
+          exchangeOrderId: r.order.exchangeOrderId,
+          intentId: r.order.intentId,
+          assetId: r.order.assetId,
+          marketId: r.order.marketId,
+          side: r.order.side,
+          eventType: ORDER_LIFECYCLE_EVENT_TYPES.STALE_DETECTED,
+          payloadJson: JSON.stringify({ reason: r.reason, detail: r.detail }),
+          occurredAt: at,
+        }).catch(() => {});
+      }
       if (this.eventBus) {
         const payload: OrderStalePayload = {
           funderAddress: r.order.funderAddress,

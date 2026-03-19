@@ -26,6 +26,10 @@ export interface SubmitOrderResult {
   rejected?: boolean;
   error?: string;
   ackAt?: Date;
+  /** True when request timed out or outcome unknown (network/adapter). */
+  timeout?: boolean;
+  /** True when outcome ambiguous (may have reached exchange; no confirmation). */
+  ambiguous?: boolean;
 }
 
 export interface CancelOrderRequest {
@@ -40,6 +44,10 @@ export interface CancelOrderResult {
   clientOrderId?: string;
   error?: string;
   canceledAt?: Date;
+  /** True when request timed out or outcome unknown. */
+  timeout?: boolean;
+  /** True when outcome ambiguous (cancel may have been sent; no confirmation). */
+  ambiguous?: boolean;
 }
 
 export interface AdapterHealth {
@@ -85,6 +93,10 @@ export interface PaperExchangeAdapterOptions {
   rejectSubmit?: (req: SubmitOrderRequest) => boolean;
   /** Reject a subset of cancels. Return true to reject. */
   rejectCancel?: (req: CancelOrderRequest) => boolean;
+  /** Return submit as timeout/ambiguous (for failure-containment tests). */
+  submitTimeoutOrAmbiguous?: (req: SubmitOrderRequest) => boolean;
+  /** Return cancel as timeout/ambiguous (for failure-containment tests). */
+  cancelTimeoutOrAmbiguous?: (req: CancelOrderRequest) => boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -104,8 +116,18 @@ export class PaperExchangeAdapter implements OrderExchangeAdapter {
   }
 
   async submitOrder(request: SubmitOrderRequest): Promise<SubmitOrderResult> {
-    const { simulateLatencyMs = 0, rejectSubmit } = this.options;
+    const { simulateLatencyMs = 0, rejectSubmit, submitTimeoutOrAmbiguous } = this.options;
     if (simulateLatencyMs > 0) await sleep(simulateLatencyMs);
+
+    if (submitTimeoutOrAmbiguous?.(request)) {
+      return {
+        success: false,
+        clientOrderId: request.clientOrderId,
+        error: "paper_timeout_or_ambiguous",
+        timeout: true,
+        ambiguous: true,
+      };
+    }
 
     if (rejectSubmit?.(request)) {
       return {
@@ -127,8 +149,18 @@ export class PaperExchangeAdapter implements OrderExchangeAdapter {
   }
 
   async cancelOrder(request: CancelOrderRequest): Promise<CancelOrderResult> {
-    const { simulateLatencyMs = 0, rejectCancel } = this.options;
+    const { simulateLatencyMs = 0, rejectCancel, cancelTimeoutOrAmbiguous } = this.options;
     if (simulateLatencyMs > 0) await sleep(simulateLatencyMs);
+
+    if (cancelTimeoutOrAmbiguous?.(request)) {
+      return {
+        success: false,
+        clientOrderId: request.clientOrderId,
+        error: "paper_cancel_timeout_or_ambiguous",
+        timeout: true,
+        ambiguous: true,
+      };
+    }
 
     if (rejectCancel?.(request)) {
       return {

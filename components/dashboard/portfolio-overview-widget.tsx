@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -12,9 +12,11 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw, Loader2, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import { useLivePortfolioPolling } from "@/hooks/use-live-portfolio-polling";
+import { PortfolioFreshnessIndicator } from "@/components/portfolio/portfolio-freshness-indicator";
 
+/** Live-computed totals. Use overview.asOf / freshnessMs for "last updated", not persisted row metadata. */
 interface PortfolioSnapshot {
-  id: string;
   totalOpenExposure: string;
   totalCurrentValue?: string;
   totalCostBasis?: string;
@@ -24,10 +26,16 @@ interface PortfolioSnapshot {
   unrealizedPnl: string;
   openPositionsCount: number;
   openOrdersCount: number;
-  topConcentrationPct: string;
+  /** Largest theme % of portfolio. */
+  topThemeConcentrationPct: string;
+  /** Largest single market % of portfolio. */
+  topMarketConcentrationPct?: string;
   yesExposure: string;
   noExposure: string;
-  createdAt: string;
+  /** @deprecated Prefer overview.asOf for last-updated. Only set when API sends persistedSnapshotMeta. */
+  id?: string;
+  /** @deprecated Prefer overview.asOf for last-updated. Only set when API sends persistedSnapshotMeta. */
+  createdAt?: string;
 }
 
 interface BehaviorFlag {
@@ -43,6 +51,30 @@ interface OverviewResponse {
   funderAddress: string;
   snapshot: PortfolioSnapshot | null;
   message?: string;
+  sourceOfTruth?: string;
+  asOf?: string;
+  /** 0 = fresh, >0 = cached age ms, null = unknown */
+  freshnessMs?: number | null;
+  freshnessState?: "fresh" | "cached" | "unknown";
+  orderSourceOfTruth?: string;
+  ordersAsOf?: string;
+  ordersFreshnessMs?: number | null;
+  ordersFreshnessState?: "fresh" | "cached" | "unknown";
+  /** Persisted DB snapshot row (audit only). Do not use for "last updated" — use asOf. */
+  persistedSnapshotMeta?: { id: string; createdAt: string };
+}
+
+/** Behavior flags API response; asOf = when this response was built (separate from overview fetch). */
+interface BehaviorFlagsResponse {
+  flags: BehaviorFlag[];
+  asOf?: string;
+}
+
+interface OverviewPollingData {
+  overview: OverviewResponse;
+  flags: BehaviorFlag[];
+  /** When flags response was built; do not imply same cycle as overview. */
+  flagsAsOf?: string;
 }
 
 function formatUsd(val: string): string {
@@ -57,44 +89,71 @@ function formatPct(val: string): string {
   return `${n.toFixed(1)}%`;
 }
 
+function formatRelative(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (!Number.isFinite(d.getTime())) return "—";
+    const diffMs = Date.now() - d.getTime();
+    const sec = Math.floor(diffMs / 1000);
+    const min = Math.floor(sec / 60);
+    if (sec < 10) return "just now";
+    if (sec < 60) return `${sec}s ago`;
+    if (min < 60) return `${min}m ago`;
+    return `${Math.floor(min / 60)}h ago`;
+  } catch {
+    return "—";
+  }
+}
+
+const FLAGS_OVERVIEW_SAME_CYCLE_THRESHOLD_MS = 5000;
+
+function flagsMateriallyDifferentFromOverview(overviewAsOf: string | undefined, flagsAsOf: string | undefined): boolean {
+  if (!overviewAsOf || !flagsAsOf) return false;
+  try {
+    const a = new Date(overviewAsOf).getTime();
+    const b = new Date(flagsAsOf).getTime();
+    return Math.abs(a - b) > FLAGS_OVERVIEW_SAME_CYCLE_THRESHOLD_MS;
+  } catch {
+    return true;
+  }
+}
+
 export function PortfolioOverviewWidget() {
-  const [overview, setOverview] = useState<OverviewResponse | null>(null);
-  const [flags, setFlags] = useState<BehaviorFlag[]>([]);
-  const [loading, setLoading] = useState(true);
   const [recomputing, setRecomputing] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    try {
-      const [overviewRes, flagsRes] = await Promise.all([
-        fetch("/api/portfolio/overview"),
-        fetch("/api/portfolio/behavior-flags"),
-      ]);
-      if (overviewRes.ok) {
-        const data = await overviewRes.json();
-        setOverview(data);
-      } else setOverview(null);
-      if (flagsRes.ok) {
-        const data = await flagsRes.json();
-        setFlags(data.flags ?? []);
-      } else setFlags([]);
-    } catch {
-      setOverview(null);
-      setFlags([]);
-    } finally {
-      setLoading(false);
-    }
+  const fetchData = useCallback(async (): Promise<OverviewPollingData> => {
+    const [overviewRes, flagsRes] = await Promise.all([
+      fetch("/api/portfolio/overview"),
+      fetch("/api/portfolio/behavior-flags"),
+    ]);
+    const overview = overviewRes.ok ? await overviewRes.json() : { snapshot: null, funderAddress: "" };
+    const flagsPayload: BehaviorFlagsResponse = flagsRes.ok ? await flagsRes.json() : { flags: [] };
+    const flags = flagsPayload.flags ?? [];
+    return { overview, flags, flagsAsOf: flagsPayload.asOf };
   }, []);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const {
+    data: pollingData,
+    loading,
+    refresh: fetchDataRefresh,
+    isRefreshing,
+  } = useLivePortfolioPolling<OverviewPollingData>(fetchData, {
+    intervalMs: 10_000,
+    refetchOnFocus: true,
+    preventOverlap: true,
+  });
+
+  const overview = pollingData?.overview ?? null;
+  const flags = pollingData?.flags ?? [];
+  const flagsAsOf = pollingData?.flagsAsOf;
 
   const runRecompute = async () => {
     setRecomputing(true);
     try {
       const res = await fetch("/api/portfolio/recompute", { method: "POST" });
       const data = await res.json();
-      if (data.success) await fetchData();
+      if (data.success) await fetchDataRefresh();
     } finally {
       setRecomputing(false);
     }
@@ -216,12 +275,12 @@ export function PortfolioOverviewWidget() {
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Top concentration</CardTitle>
+            <CardTitle className="text-base">Top theme concentration</CardTitle>
             <CardDescription>Largest theme % of portfolio</CardDescription>
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-semibold tabular-nums">
-              {snapshot ? formatPct(snapshot.topConcentrationPct) : "—"}
+              {snapshot ? formatPct(snapshot.topThemeConcentrationPct) : "—"}
             </p>
           </CardContent>
         </Card>
@@ -245,7 +304,20 @@ export function PortfolioOverviewWidget() {
               <AlertTriangle className="h-4 w-4" />
               Behavior flags
             </CardTitle>
-            <CardDescription>Risk / behavior signals (read-only)</CardDescription>
+            <CardDescription>
+              Risk / behavior signals (read-only).
+              {flagsAsOf && (
+                <>
+                  {" "}
+                  Flags as of {formatRelative(flagsAsOf)}.
+                  {flagsMateriallyDifferentFromOverview(overview?.asOf, flagsAsOf) && (
+                    <span className="block mt-1 text-muted-foreground/90">
+                      Separate refresh — may not match overview snapshot.
+                    </span>
+                  )}
+                </>
+              )}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <ul className="space-y-2">
@@ -271,7 +343,7 @@ export function PortfolioOverviewWidget() {
         </Card>
       )}
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="outline"
           size="sm"
@@ -281,6 +353,25 @@ export function PortfolioOverviewWidget() {
           {recomputing ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
           Recompute portfolio
         </Button>
+        {(overview?.asOf != null || overview?.ordersAsOf != null) && (
+          <PortfolioFreshnessIndicator
+            sourceOfTruth={overview.sourceOfTruth}
+            asOf={overview.asOf}
+            freshnessMs={overview.freshnessMs}
+            freshnessState={overview.freshnessState}
+            orderSourceOfTruth={overview.orderSourceOfTruth}
+            ordersAsOf={overview.ordersAsOf}
+            ordersFreshnessMs={overview.ordersFreshnessMs}
+            ordersFreshnessState={overview.ordersFreshnessState}
+            compact
+          />
+        )}
+        {isRefreshing && (
+          <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Updating…
+          </span>
+        )}
         {!snapshot && overview && (
           <p className="text-sm text-muted-foreground">
             Run &quot;Sync user data&quot; then &quot;Recompute portfolio&quot; to generate overview.

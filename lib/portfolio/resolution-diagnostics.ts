@@ -5,6 +5,7 @@
  */
 
 import { prisma } from "@/lib/db";
+import { normalizeConditionId } from "@/lib/polymarket/portfolio";
 
 export interface PositionResolutionTrace {
   assetId: string;
@@ -82,7 +83,13 @@ export async function traceResolutionForAssetIds(
       if (pos) derivedPosition = { marketId: pos.marketId, syncedMarketId: pos.syncedMarketId };
     }
 
-    const [syncedAssetExact, syncedAssetNorm, syncedMarketByCond, syncedMarketByCondNorm] = await Promise.all([
+    const condNorm = marketIdFromFills ? normalizeConditionId(marketIdFromFills) : "";
+    const condVariants = [
+      ...new Set(
+        [marketIdFromFills, normalizeId(marketIdFromFills), condNorm].filter(Boolean)
+      ),
+    ];
+    const [syncedAssetExact, syncedAssetNorm, syncedMarketByCond] = await Promise.all([
       prisma.syncedAsset.findMany({
         where: { tokenId: norm },
         select: { tokenId: true, syncedMarketId: true },
@@ -95,16 +102,9 @@ export async function traceResolutionForAssetIds(
             take: 5,
           })
         : [],
-      marketIdFromFills
+      condVariants.length > 0
         ? prisma.syncedMarket.findMany({
-            where: { conditionId: marketIdFromFills },
-            select: { id: true, conditionId: true, slug: true },
-            take: 5,
-          })
-        : [],
-      marketIdFromFills && normalizeId(marketIdFromFills) !== marketIdFromFills
-        ? prisma.syncedMarket.findMany({
-            where: { conditionId: normalizeId(marketIdFromFills) },
+            where: { conditionId: { in: condVariants } },
             select: { id: true, conditionId: true, slug: true },
             take: 5,
           })
@@ -118,16 +118,12 @@ export async function traceResolutionForAssetIds(
       conditionId: m.conditionId,
       slug: m.slug,
     }));
-    const syncedMarketByConditionIdNormalized = syncedMarketByCondNorm.map((m) => ({
-      id: m.id,
-      conditionId: m.conditionId,
-      slug: m.slug,
-    }));
+    const syncedMarketByConditionIdNormalized: { id: string; conditionId: string | null; slug: string | null }[] = [];
 
     let failureReason: string;
     if (syncedAssetByTokenId.length > 0 || syncedAssetByTokenIdNormalized.length > 0) {
       failureReason = "SyncedAsset found; check SyncedMarket link or resolver order.";
-    } else if (syncedMarketByConditionId.length > 0 || syncedMarketByConditionIdNormalized.length > 0) {
+    } else if (syncedMarketByConditionId.length > 0) {
       failureReason = "SyncedMarket found by conditionId but SyncedAsset by tokenId missing (tokenId format or missing assets for this market).";
     } else if (!marketIdFromFills) {
       failureReason = "No UserFill for this assetId (or funder not provided).";

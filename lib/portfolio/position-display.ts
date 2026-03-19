@@ -25,16 +25,19 @@ export interface PositionView {
   theme: string | null;
   /** How position was resolved: marketId | conditionId | assetId | unresolved. */
   resolutionSource: "marketId" | "conditionId" | "assetId" | "unresolved";
+  /** True when linked to canonical market record. */
   isResolved: boolean;
+  /** True when market end date is in the past (for "Resolved" in time display). */
+  marketEndDatePassed?: boolean;
   isStale: boolean;
   isNearResolution: boolean;
   endDate: string | null;
   lastSyncedAt: string | null;
-  /** Existing position metrics (for consumers that need them). */
+  /** Existing position metrics (for consumers that need them). Null when basis unavailable. */
   size?: string;
-  avgEntry?: string;
+  avgEntry?: string | null;
   marketValue?: string;
-  unrealizedPnl?: string;
+  unrealizedPnl?: string | null;
   realizedPnl?: string;
   outcome?: string;
   side?: string;
@@ -129,13 +132,13 @@ export interface CanonicalPositionApiShape {
   token?: { assetId?: string; outcome?: string; side?: string };
   economics?: {
     quantity?: string;
-    avgEntry?: string;
+    avgEntry?: string | null;
     markPrice?: string;
     exposure?: string;
     currentValue?: string;
-    costBasis?: string;
+    costBasis?: string | null;
     maxPayout?: string;
-    unrealizedPnl?: string;
+    unrealizedPnl?: string | null;
     realizedPnl?: string;
   };
   timing?: {
@@ -145,7 +148,12 @@ export interface CanonicalPositionApiShape {
   quality?: {
     isResolved?: boolean;
     matchedBy?: "marketId" | "conditionId" | "assetId" | null;
-    hasFullMarketMetadata?: boolean;
+    resolutionSource?: "marketId" | "conditionId" | "assetId" | "unresolved";
+    unresolvedReason?: string | null;
+    /** True when all required display fields present. */
+    hasCompleteDisplayMetadata?: boolean;
+    /** True when market end date is in the past (for time-to-resolution display). */
+    marketEndDatePassed?: boolean;
   };
   syncedMarketId?: string | null;
   rawMarketRef?: string | null;
@@ -171,8 +179,8 @@ export function toPositionViewFromCanonical(
 
   const syncedMarketId = item.syncedMarketId ?? market.id ?? null;
   const rawMarketRef = item.rawMarketRef ?? null;
-  const resolutionSource = (item.resolutionSource ?? quality.matchedBy ?? "unresolved") as PositionView["resolutionSource"];
-  const hasFull = quality.hasFullMarketMetadata ?? quality.matchedBy != null;
+  const resolutionSource = (item.resolutionSource ?? quality.resolutionSource ?? quality.matchedBy ?? "unresolved") as PositionView["resolutionSource"];
+  const hasFull = quality.hasCompleteDisplayMetadata ?? false;
   const effectiveSource: PositionView["resolutionSource"] =
     resolutionSource === "marketId" || resolutionSource === "conditionId" || resolutionSource === "assetId"
       ? resolutionSource
@@ -200,6 +208,7 @@ export function toPositionViewFromCanonical(
     theme: strOrEmpty(market.theme) || null,
     resolutionSource: effectiveSource,
     isResolved: quality.isResolved ?? false,
+    marketEndDatePassed: quality.marketEndDatePassed ?? false,
     isStale,
     isNearResolution,
     endDate: market.endDate ?? null,

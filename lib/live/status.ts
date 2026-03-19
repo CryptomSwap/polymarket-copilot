@@ -1,9 +1,98 @@
 /**
  * Persist WebSocket connection status and live events.
  * Used by ws-user and ws-market to record heartbeat, last message, and events.
+ *
+ * Writes are debounced/coalesced (except disconnect and errors) to reduce Prisma pool pressure.
  */
 
 import { prisma } from "@/lib/db";
+
+const DEBOUNCE_MS = Number(process.env.WS_STATUS_PERSIST_DEBOUNCE_MS ?? "2500") || 2500;
+
+type MergedWs = {
+  connected: boolean;
+  lastHeartbeatAt: Date | null | undefined;
+  lastMessageAt: Date | null | undefined;
+  lastError: string | null | undefined;
+};
+
+const pending = new Map<string, MergedWs>();
+const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const lastSerializedOk = new Map<string, string>();
+
+function cacheKey(funder: string, channel: string): string {
+  return `${funder}\0${channel}`;
+}
+
+function serialize(m: MergedWs): string {
+  return JSON.stringify({
+    c: m.connected,
+    h: m.lastHeartbeatAt instanceof Date ? m.lastHeartbeatAt.toISOString() : m.lastHeartbeatAt ?? null,
+    m: m.lastMessageAt instanceof Date ? m.lastMessageAt.toISOString() : m.lastMessageAt ?? null,
+    e: m.lastError ?? null,
+  });
+}
+
+function merge(prev: MergedWs | undefined, data: {
+  connected: boolean;
+  lastHeartbeatAt?: Date | null;
+  lastMessageAt?: Date | null;
+  lastError?: string | null;
+}): MergedWs {
+  const p = prev ?? {
+    connected: false,
+    lastHeartbeatAt: undefined,
+    lastMessageAt: undefined,
+    lastError: undefined,
+  };
+  return {
+    connected: data.connected,
+    lastHeartbeatAt:
+      data.lastHeartbeatAt !== undefined ? data.lastHeartbeatAt : p.lastHeartbeatAt,
+    lastMessageAt: data.lastMessageAt !== undefined ? data.lastMessageAt : p.lastMessageAt,
+    lastError: data.lastError !== undefined ? data.lastError : p.lastError,
+  };
+}
+
+async function upsertWsRow(
+  funder: string,
+  channel: "user-feed" | "market-feed",
+  m: MergedWs
+): Promise<void> {
+  await prisma.websocketConnectionStatus.upsert({
+    where: {
+      funderAddress_channel: { funderAddress: funder, channel },
+    },
+    create: {
+      funderAddress: funder,
+      channel,
+      connected: m.connected,
+      lastHeartbeatAt: m.lastHeartbeatAt ?? undefined,
+      lastMessageAt: m.lastMessageAt ?? undefined,
+      lastError: m.lastError ?? undefined,
+    },
+    update: {
+      connected: m.connected,
+      ...(m.lastHeartbeatAt !== undefined && { lastHeartbeatAt: m.lastHeartbeatAt }),
+      ...(m.lastMessageAt !== undefined && { lastMessageAt: m.lastMessageAt }),
+      ...(m.lastError !== undefined && { lastError: m.lastError }),
+    },
+  });
+}
+
+async function flushKey(k: string, funder: string, channel: "user-feed" | "market-feed"): Promise<void> {
+  const m = pending.get(k);
+  pending.delete(k);
+  if (!m) return;
+  const ser = serialize(m);
+  if (ser === lastSerializedOk.get(k)) return;
+  try {
+    await upsertWsRow(funder, channel, m);
+    lastSerializedOk.set(k, ser);
+  } catch (e) {
+    console.error("[live/status] updateWsStatus flush failed", e);
+  }
+}
 
 export async function updateWsStatus(
   funderAddress: string,
@@ -16,29 +105,37 @@ export async function updateWsStatus(
   }
 ): Promise<void> {
   const funder = funderAddress.toLowerCase();
-  try {
-    await prisma.websocketConnectionStatus.upsert({
-      where: {
-        funderAddress_channel: { funderAddress: funder, channel },
-      },
-      create: {
-        funderAddress: funder,
-        channel,
-        connected: data.connected,
-        lastHeartbeatAt: data.lastHeartbeatAt ?? undefined,
-        lastMessageAt: data.lastMessageAt ?? undefined,
-        lastError: data.lastError ?? undefined,
-      },
-      update: {
-        connected: data.connected,
-        ...(data.lastHeartbeatAt !== undefined && { lastHeartbeatAt: data.lastHeartbeatAt }),
-        ...(data.lastMessageAt !== undefined && { lastMessageAt: data.lastMessageAt }),
-        ...(data.lastError !== undefined && { lastError: data.lastError }),
-      },
-    });
-  } catch (e) {
-    console.error("[live/status] updateWsStatus failed", e);
+  const k = cacheKey(funder, channel);
+  const merged = merge(pending.get(k), data);
+  pending.set(k, merged);
+
+  const disconnect = !data.connected;
+  const errorSignal =
+    data.lastError !== undefined && data.lastError !== null && String(data.lastError).length > 0;
+
+  if (disconnect || errorSignal) {
+    const t = debounceTimers.get(k);
+    if (t) {
+      clearTimeout(t);
+      debounceTimers.delete(k);
+    }
+    try {
+      await flushKey(k, funder, channel);
+    } catch (e) {
+      console.error("[live/status] updateWsStatus failed", e);
+    }
+    return;
   }
+
+  const t = debounceTimers.get(k);
+  if (t) clearTimeout(t);
+  debounceTimers.set(
+    k,
+    setTimeout(() => {
+      debounceTimers.delete(k);
+      void flushKey(k, funder, channel);
+    }, DEBOUNCE_MS)
+  );
 }
 
 export async function persistLiveEvent(params: {

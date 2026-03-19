@@ -4,6 +4,7 @@ import { PortfolioIntelligenceWidget } from "@/components/dashboard/portfolio-in
 import { RecommendationsWidget } from "@/components/dashboard/recommendations-widget";
 import { NewsSyncWidget } from "@/components/dashboard/news-sync-widget";
 import { AlertsWidget } from "@/components/dashboard/alerts-widget";
+import { SummaryStrip } from "@/components/dashboard/summary-strip";
 
 export default function DashboardPage() {
   return (
@@ -17,7 +18,9 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      <section>
+      <SummaryStrip />
+
+      <section id="alerts">
         <h3 className="mb-3 text-lg font-semibold text-foreground">
           Alerts
         </h3>

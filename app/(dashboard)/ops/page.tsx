@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Loader2, Activity, Radio, AlertTriangle, RefreshCw, Server, Play, CheckCircle, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { GuardrailsCard } from "@/components/bot/guardrails-card";
 
 interface WsChannel {
   connected: boolean;
@@ -31,15 +32,16 @@ interface LiveEventRow {
   createdAt: string;
 }
 
-interface DriftAlertRow {
+/** Alert feed item (drift + engine) from GET /api/alerts/feed */
+interface AlertFeedRow {
   id: string;
-  alertType: string;
+  type: string;
   severity: string;
+  title: string;
   message: string;
-  polymarketOrderId: string | null;
-  assetId: string | null;
-  marketId: string | null;
-  resolved: boolean;
+  source: "drift" | "engine";
+  driftAlertId?: string | null;
+  entityRefs?: { assetId?: string | null; marketId?: string | null; polymarketOrderId?: string | null };
   createdAt: string;
 }
 
@@ -73,7 +75,7 @@ interface JobRunRow {
 export default function OpsPage() {
   const [wsStatus, setWsStatus] = useState<{ userFeed: WsChannel; marketFeed: WsChannel } | null>(null);
   const [events, setEvents] = useState<LiveEventRow[]>([]);
-  const [alerts, setAlerts] = useState<DriftAlertRow[]>([]);
+  const [alerts, setAlerts] = useState<AlertFeedRow[]>([]);
   const [positions, setPositions] = useState<PositionRow[]>([]);
   const [openOrders, setOpenOrders] = useState<Array<{ orderId: string; assetId: string; market: string; originalSize: string; sizeMatched: string; status: string }>>([]);
   const [workerHeartbeats, setWorkerHeartbeats] = useState<WorkerHeartbeatRow[]>([]);
@@ -89,7 +91,7 @@ export default function OpsPage() {
       const [wsRes, eventsRes, alertsRes, positionsRes, ordersRes, workerRes, jobsRes] = await Promise.all([
         fetch("/api/live/ws-status"),
         fetch("/api/live/events?limit=30"),
-        fetch("/api/live/alerts?resolved=false&limit=30"),
+        fetch("/api/alerts/feed?resolved=false&limit=30&source=all"),
         fetch("/api/portfolio/positions"),
         fetch("/api/orders/list?limit=50"),
         fetch("/api/ops/worker-status"),
@@ -169,7 +171,7 @@ export default function OpsPage() {
   const urgentPositions = positions.filter(
     (p) => p.decision?.decisionState === "EXIT" || p.decision?.decisionState === "THESIS_BROKEN"
   );
-  const activeAlerts = alerts.filter((a) => !a.resolved);
+  const activeAlerts = alerts;
 
   if (loading) {
     return (
@@ -194,6 +196,8 @@ export default function OpsPage() {
           Reconcile affected
         </Button>
       </div>
+
+      <GuardrailsCard />
 
       {/* Worker process health (distinct from WebSocket connection status) */}
       <Card>
@@ -347,11 +351,11 @@ export default function OpsPage() {
         </CardContent>
       </Card>
 
-      {/* Active drift alerts */}
+      {/* Alert feed (drift + engine) */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5" /> Active drift alerts</CardTitle>
-          <CardDescription>Unresolved alerts from local vs remote mismatch, stale WS, or stale decision.</CardDescription>
+          <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5" /> Alerts</CardTitle>
+          <CardDescription>Sync (drift) and portfolio (engine) alerts. Resolve drift alerts on resolve endpoint.</CardDescription>
         </CardHeader>
         <CardContent>
           {activeAlerts.length === 0 ? (
@@ -361,6 +365,7 @@ export default function OpsPage() {
               <table className="w-full border-collapse">
                 <thead>
                   <tr className="border-b border-border">
+                    <th className="text-left py-2 px-2 font-medium">Source</th>
                     <th className="text-left py-2 px-2 font-medium">Type</th>
                     <th className="text-left py-2 px-2 font-medium">Severity</th>
                     <th className="text-left py-2 px-2 font-medium">Message</th>
@@ -370,7 +375,14 @@ export default function OpsPage() {
                 <tbody>
                   {activeAlerts.slice(0, 15).map((a) => (
                     <tr key={a.id} className="border-b border-border/50">
-                      <td className="py-2 px-2">{a.alertType}</td>
+                      <td className="py-2 px-2">
+                        <span className={cn(
+                          "rounded px-1.5 py-0.5 text-xs",
+                          a.source === "drift" && "bg-amber-500/20 text-amber-700 dark:text-amber-400",
+                          a.source === "engine" && "bg-sky-500/20 text-sky-700 dark:text-sky-400"
+                        )}>{a.source === "drift" ? "Sync" : "Portfolio"}</span>
+                      </td>
+                      <td className="py-2 px-2">{a.type}</td>
                       <td className="py-2 px-2">
                         <span className={cn(
                           "rounded px-1.5 py-0.5 text-xs",
@@ -379,7 +391,7 @@ export default function OpsPage() {
                           a.severity === "info" && "bg-muted text-muted-foreground"
                         )}>{a.severity}</span>
                       </td>
-                      <td className="py-2 px-2 max-w-[300px] truncate" title={a.message}>{a.message}</td>
+                      <td className="py-2 px-2 max-w-[300px] truncate" title={a.message}>{a.title ? `${a.title}: ${a.message}` : a.message}</td>
                       <td className="py-2 px-2 text-muted-foreground">{new Date(a.createdAt).toLocaleString()}</td>
                     </tr>
                   ))}

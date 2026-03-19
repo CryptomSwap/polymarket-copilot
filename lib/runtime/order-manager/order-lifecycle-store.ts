@@ -20,12 +20,25 @@ const OPEN_STATUSES: RuntimeOrderStatus[] = [
 
 const TERMINAL_STATUSES: RuntimeOrderStatus[] = ["filled", "canceled", "rejected", "expired"];
 
+/** Ambiguous execution states: no further auto transitions until verification. */
+const AMBIGUOUS_STATUSES: RuntimeOrderStatus[] = [
+  "submit_ambiguous",
+  "cancel_ambiguous",
+  "replace_ambiguous",
+  "exchange_ack_timeout",
+  "execution_verification_required",
+];
+
 function isOpen(status: RuntimeOrderStatus): boolean {
   return OPEN_STATUSES.includes(status);
 }
 
 function isTerminal(status: RuntimeOrderStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
+}
+
+function isAmbiguous(status: RuntimeOrderStatus): boolean {
+  return AMBIGUOUS_STATUSES.includes(status);
 }
 
 /** Allowed transitions for lifecycle mutations. */
@@ -94,10 +107,39 @@ export interface OrderLifecycleStore {
 }
 
 const DEFAULT_STALE_MS = 120_000;
+const ORDER_TERMINAL_TTL_MS =
+  Number(process.env.RUNTIME_ORDER_TERMINAL_TTL_MS ?? String(6 * 60 * 60 * 1000)) ||
+  6 * 60 * 60 * 1000;
+const ORDER_TERMINAL_MAX =
+  Number(process.env.RUNTIME_ORDER_TERMINAL_MAX ?? "4000") || 4000;
 
 export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
   private readonly byClientId = new Map<string, RuntimeOrderState>();
   private readonly byExternalId = new Map<string, RuntimeOrderState>();
+  private mutationCount = 0;
+
+  private maybePruneTerminal(now: Date = new Date()): void {
+    this.mutationCount++;
+    if (this.mutationCount % 200 !== 0) return;
+    const cutoff = now.getTime() - ORDER_TERMINAL_TTL_MS;
+    const terminal: Array<{ id: string; updatedAt: number; exchangeOrderId: string | null }> = [];
+    for (const [id, o] of this.byClientId.entries()) {
+      if (!isTerminal(o.status)) continue;
+      terminal.push({ id, updatedAt: o.updatedAt.getTime(), exchangeOrderId: o.exchangeOrderId ?? null });
+      if (o.updatedAt.getTime() < cutoff) {
+        if (o.exchangeOrderId) this.byExternalId.delete(o.exchangeOrderId);
+        this.byClientId.delete(id);
+      }
+    }
+    if (terminal.length <= ORDER_TERMINAL_MAX) return;
+    terminal.sort((a, b) => a.updatedAt - b.updatedAt);
+    const excess = terminal.length - ORDER_TERMINAL_MAX;
+    for (let i = 0; i < excess; i++) {
+      const t = terminal[i];
+      if (t.exchangeOrderId) this.byExternalId.delete(t.exchangeOrderId);
+      this.byClientId.delete(t.id);
+    }
+  }
 
   private toLegacy(state: RuntimeOrderState): RuntimeOrderState {
     return {
@@ -152,6 +194,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
       appliedPositionFilledSize: 0,
     };
     this.byClientId.set(params.clientOrderId, state);
+    this.maybePruneTerminal(now);
     return this.toLegacy(cloneOrder(state));
   }
 
@@ -159,14 +202,17 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     const o = this.byClientId.get(clientOrderId);
     if (!o) return;
     if (isTerminal(o.status)) return;
+    if (isAmbiguous(o.status)) return;
     const next = { ...o, status, updatedAt: new Date() };
     this.byClientId.set(clientOrderId, next);
+    this.maybePruneTerminal(next.updatedAt);
   }
 
   applyAck(clientOrderId: string, exchangeOrderId: string): void {
     const o = this.byClientId.get(clientOrderId);
     if (!o) return;
     if (o.status !== "pending_submit") return;
+    if (isAmbiguous(o.status)) return;
     const now = new Date();
     const next: RuntimeOrderState = {
       ...o,
@@ -178,6 +224,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     };
     this.byClientId.set(clientOrderId, next);
     this.byExternalId.set(exchangeOrderId, next);
+    this.maybePruneTerminal(now);
   }
 
   applyPartialFill(clientOrderId: string, fillSize: number, _fillPrice: number): void {
@@ -198,6 +245,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     };
     this.byClientId.set(clientOrderId, next);
     if (o.exchangeOrderId) this.byExternalId.set(o.exchangeOrderId, next);
+    this.maybePruneTerminal(now);
   }
 
   applyFill(clientOrderId: string, fillSize: number, fillPrice: number): void {
@@ -213,6 +261,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     const next: RuntimeOrderState = { ...o, status: "canceled", updatedAt: now };
     this.byClientId.set(clientOrderId, next);
     if (o.exchangeOrderId) this.byExternalId.set(o.exchangeOrderId, next);
+    this.maybePruneTerminal(now);
   }
 
   applyReject(clientOrderId: string): void {
@@ -223,6 +272,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     const next: RuntimeOrderState = { ...o, status: "rejected", updatedAt: now };
     this.byClientId.set(clientOrderId, next);
     if (o.exchangeOrderId) this.byExternalId.delete(o.exchangeOrderId);
+    this.maybePruneTerminal(now);
   }
 
   setAppliedPositionFilledSize(clientOrderId: string, newValue: number): void {
@@ -234,6 +284,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     const next = { ...o, appliedPositionFilledSize: capped, updatedAt: new Date() };
     this.byClientId.set(clientOrderId, next);
     if (o.exchangeOrderId) this.byExternalId.set(o.exchangeOrderId, next);
+    this.maybePruneTerminal(next.updatedAt);
   }
 
   listWorkingByAsset(funderAddress: string, assetId: string): RuntimeOrderState[] {
@@ -315,6 +366,7 @@ export class InMemoryOrderLifecycleStore implements OrderLifecycleStore {
     if (normalized.exchangeOrderId) {
       this.byExternalId.set(normalized.exchangeOrderId, normalized);
     }
+    this.maybePruneTerminal(normalized.updatedAt);
   }
 
   delete(clientOrderId: string): void {

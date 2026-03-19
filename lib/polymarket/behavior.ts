@@ -4,6 +4,7 @@
  */
 
 import type { DerivedPositionRow } from "./portfolio";
+import type { BehaviorFlagSourceScope } from "./behavior-flags";
 
 export type BehaviorFlagType =
   | "CORRELATED_STACKING"
@@ -21,6 +22,8 @@ export interface BehaviorFlagRow {
   marketTitle: string | null;
   description: string;
   metadata: Record<string, unknown> | null;
+  /** See lib/polymarket/behavior-flags.ts */
+  sourceScope: BehaviorFlagSourceScope;
 }
 
 const CONCENTRATION_PCT_THRESHOLD = 40;
@@ -60,6 +63,7 @@ export function computeBehaviorFlags(
         marketTitle: null,
         description: `${theme}: ${pct.toFixed(1)}% of portfolio exposure.`,
         metadata: { theme, pct, positionsCount: posList.length },
+        sourceScope: "portfolio",
       });
     }
     if (posList.length >= SIMILAR_MARKETS_STACK) {
@@ -70,6 +74,7 @@ export function computeBehaviorFlags(
         marketTitle: null,
         description: `${posList.length} positions in theme "${theme}".`,
         metadata: { theme, count: posList.length },
+        sourceScope: "portfolio",
       });
     }
   }
@@ -82,6 +87,7 @@ export function computeBehaviorFlags(
       marketTitle: null,
       description: `${opts.recentFillsCount24h} fills in last 24h.`,
       metadata: { recentFillsCount24h: opts.recentFillsCount24h },
+      sourceScope: "manual",
     });
   }
 
@@ -96,6 +102,7 @@ export function computeBehaviorFlags(
         marketTitle: p.marketTitle,
         description: `Low-price position (${(lastPrice * 100).toFixed(1)}¢): ${p.marketTitle.slice(0, 50)}...`,
         metadata: { assetId: p.assetId, lastPrice },
+        sourceScope: "manual",
       });
     }
     if (avgEntry > 0 && lastPrice > avgEntry * (1 + CHASING_ENTRY_AFTER_PUMP_PCT / 100)) {
@@ -106,6 +113,7 @@ export function computeBehaviorFlags(
         marketTitle: p.marketTitle,
         description: `Entry ~${(avgEntry * 100).toFixed(1)}¢, last ~${(lastPrice * 100).toFixed(1)}¢ (possible chase).`,
         metadata: { assetId: p.assetId, avgEntry, lastPrice },
+        sourceScope: "manual",
       });
     }
   }

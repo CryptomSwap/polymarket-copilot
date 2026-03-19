@@ -17,7 +17,13 @@ export type RuntimeOrderStatus =
   | "filled"
   | "rejected"
   | "expired"
-  | "unknown";
+  | "unknown"
+  // Execution failure / ambiguity (fail closed; no hide under working/unknown)
+  | "submit_ambiguous"
+  | "cancel_ambiguous"
+  | "replace_ambiguous"
+  | "exchange_ack_timeout"
+  | "execution_verification_required";
 
 /** In-memory order state; keyed by clientOrderId. */
 export interface RuntimeOrderState {
@@ -73,6 +79,8 @@ export interface OrderPartialFillInput {
   fillSize: number;
   fillPrice: number;
   filledAt: Date;
+  /** For durable fill ledger: dedupe and mark applied after position update. */
+  exchangeFillId?: string | null;
 }
 
 export interface OrderFullFillInput {
@@ -80,6 +88,8 @@ export interface OrderFullFillInput {
   totalFilledSize: number;
   avgPrice: number;
   filledAt: Date;
+  /** For durable fill ledger: dedupe and mark applied after position update. */
+  exchangeFillId?: string | null;
 }
 
 export interface OrderCancelAckInput {

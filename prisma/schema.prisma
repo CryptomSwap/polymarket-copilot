@@ -1,5 +1,3 @@
-// Prisma schema for Polymarket Copilot
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -10,45 +8,49 @@ datasource db {
 }
 
 model ConnectedWallet {
-  id              String   @id @default(cuid())
-  eoaAddress      String
-  funderAddress   String
-  signatureType   Int      @default(2)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  credential      PolymarketApiCredential?
+  id            String                   @id @default(cuid())
+  eoaAddress    String
+  funderAddress String
+  signatureType Int                      @default(2)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  credential    PolymarketApiCredential?
 }
 
 model PolymarketApiCredential {
-  id                String    @id @default(cuid())
-  connectedWalletId String    @unique
-  connectedWallet   ConnectedWallet @relation(fields: [connectedWalletId], references: [id], onDelete: Cascade)
-  apiKey            String
-  encryptedSecret   String
+  id                  String          @id @default(cuid())
+  connectedWalletId   String          @unique
+  apiKey              String
+  encryptedSecret     String
   encryptedPassphrase String
-  funderAddress     String
-  signatureType     Int
-  lastValidatedAt   DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  funderAddress       String
+  signatureType       Int
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  lastValidatedAt     DateTime?
+  polyAddress         String?
+  validationApiKeysOk Boolean?
+  validationOrdersOk  Boolean?
+  validationTradesOk  Boolean?
+  connectedWallet     ConnectedWallet @relation(fields: [connectedWalletId], references: [id], onDelete: Cascade)
 }
 
 model SyncedMarket {
-  id                String            @id @default(cuid())
-  conditionId       String?
-  slug              String            @unique
-  title             String
-  status            String?
-  endDate           DateTime?
-  category          String?
-  volumeNum         Float?
-  liquidityNum      Float?
-  raw               String?           @db.Text
-  syncedAt          DateTime?         @default(now())
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
-  assets            SyncedAsset[]
-  derivedPositions  DerivedPosition[]
+  id               String            @id @default(cuid())
+  conditionId      String?
+  slug             String            @unique
+  title            String
+  status           String?
+  endDate          DateTime?
+  category         String?
+  volumeNum        Float?
+  liquidityNum     Float?
+  raw              String?
+  syncedAt         DateTime?         @default(now())
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  derivedPositions DerivedPosition[]
+  assets           SyncedAsset[]
 }
 
 model SyncedAsset {
@@ -63,17 +65,17 @@ model SyncedAsset {
 }
 
 model UserOrder {
-  funderAddress  String
-  orderId        String
-  market         String
-  assetId        String
-  side           String
-  originalSize   String
-  sizeMatched    String
-  price          String
-  status         String
-  outcome        String?
-  syncedAt       DateTime? @updatedAt
+  funderAddress String
+  orderId       String
+  market        String
+  assetId       String
+  side          String
+  originalSize  String
+  sizeMatched   String
+  price         String
+  status        String
+  outcome       String?
+  syncedAt      DateTime? @updatedAt
 
   @@id([funderAddress, orderId])
   @@index([funderAddress])
@@ -109,29 +111,29 @@ model UserPosition {
 }
 
 model DerivedPosition {
-  funderAddress       String
-  assetId             String
-  marketId            String   // Raw upstream reference (CLOB/fill market id; may be conditionId or our id)
-  syncedMarketId      String?  // Canonical internal id: SyncedMarket.id when resolution succeeded; null if unresolved
-  syncedMarket        SyncedMarket? @relation(fields: [syncedMarketId], references: [id], onDelete: SetNull)
-  marketTitle         String
-  outcome             String
-  side                String
-  size                String
-  avgEntry            String
-  lastPrice           String
-  costBasis           String
-  marketValue         String
-  unrealizedPnl       String
-  realizedPnl         String
-  reservedOrderSize   String
-  reservedOrderValue  String
-  category            String?
-  theme               String?
-  openedAt            DateTime?
-  decisionSnapshots   PositionDecisionSnapshot[]
-  exitIntents         ExitIntent[]
-  positionThesis      PositionThesis?
+  funderAddress      String
+  assetId            String
+  marketId           String
+  marketTitle        String
+  outcome            String
+  side               String
+  size               String
+  avgEntry           String
+  lastPrice          String
+  costBasis          String
+  marketValue        String
+  unrealizedPnl      String
+  realizedPnl        String
+  reservedOrderSize  String
+  reservedOrderValue String
+  category           String?
+  theme              String?
+  openedAt           DateTime?
+  syncedMarketId     String?
+  syncedMarket       SyncedMarket?             @relation(fields: [syncedMarketId], references: [id])
+  exitIntents        ExitIntent[]
+  decisionSnapshots  PositionDecisionSnapshot?
+  positionThesis     PositionThesis?
 
   @@id([funderAddress, assetId])
   @@index([funderAddress])
@@ -139,18 +141,17 @@ model DerivedPosition {
   @@index([syncedMarketId])
 }
 
-// Position Thesis v1: rationale and lifecycle for important positions (lightweight, one per position).
 model PositionThesis {
-  id                  String   @id @default(cuid())
+  id                  String          @id @default(cuid())
   funderAddress       String
   assetId             String
-  marketId            String?  // Canonical SyncedMarket.id when known
-  entryThesis         String?  @db.Text
-  currentThesisStatus String   @default("unknown")  // intact | weakened | invalidated | unknown
-  exitReason          String?  @db.Text
-  notes               String?  @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  marketId            String?
+  entryThesis         String?
+  currentThesisStatus String          @default("unknown")
+  exitReason          String?
+  notes               String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
   position            DerivedPosition @relation(fields: [funderAddress, assetId], references: [funderAddress, assetId], onDelete: Cascade)
 
   @@unique([funderAddress, assetId])
@@ -159,16 +160,16 @@ model PositionThesis {
 }
 
 model PositionDecisionSnapshot {
-  id                   String   @id @default(cuid())
-  funderAddress        String
-  assetId              String
-  decisionState         String   // HOLD | TRIM | REDUCE | EXIT | TAKE_PROFIT | THESIS_BROKEN
-  confidence            String
-  suggestedExitSize     String
-  reasoningJson         String?  @db.Text
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
-  position              DerivedPosition @relation(fields: [funderAddress, assetId], references: [funderAddress, assetId], onDelete: Cascade)
+  id                String          @id @default(cuid())
+  funderAddress     String
+  assetId           String
+  decisionState     String
+  confidence        String
+  suggestedExitSize String
+  reasoningJson     String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  position          DerivedPosition @relation(fields: [funderAddress, assetId], references: [funderAddress, assetId], onDelete: Cascade)
 
   @@unique([funderAddress, assetId])
   @@index([funderAddress])
@@ -176,20 +177,20 @@ model PositionDecisionSnapshot {
 }
 
 model ExitIntent {
-  id                String   @id @default(cuid())
-  funderAddress     String
-  assetId           String
-  marketId          String
-  recommendationId  String?
-  side              String
-  exitType          String   // TRIM | REDUCE | EXIT | TAKE_PROFIT | THESIS_BROKEN
-  limitPrice        String
-  size              String
-  status            String   // pending | placed | filled | cancelled | failed
-  previewJson       String?  @db.Text
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  position          DerivedPosition @relation(fields: [funderAddress, assetId], references: [funderAddress, assetId], onDelete: Cascade)
+  id               String          @id @default(cuid())
+  funderAddress    String
+  assetId          String
+  marketId         String
+  recommendationId String?
+  side             String
+  exitType         String
+  limitPrice       String
+  size             String
+  status           String
+  previewJson      String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  position         DerivedPosition @relation(fields: [funderAddress, assetId], references: [funderAddress, assetId], onDelete: Cascade)
 
   @@index([funderAddress])
   @@index([assetId])
@@ -197,15 +198,15 @@ model ExitIntent {
 }
 
 model LiveEvent {
-  id                  String   @id @default(cuid())
-  funderAddress       String
-  source              String   // user-feed | market-feed
-  eventType           String
-  polymarketOrderId   String?
-  assetId             String?
-  marketId            String?
-  payloadJson         String?  @db.Text
-  createdAt           DateTime @default(now())
+  id                String   @id @default(cuid())
+  funderAddress     String
+  source            String
+  eventType         String
+  polymarketOrderId String?
+  assetId           String?
+  marketId          String?
+  payloadJson       String?
+  createdAt         DateTime @default(now())
 
   @@index([funderAddress])
   @@index([source])
@@ -214,18 +215,18 @@ model LiveEvent {
 }
 
 model DriftAlert {
-  id                  String   @id @default(cuid())
-  funderAddress       String
-  alertType           String
-  severity            String   // info | warning | critical
-  polymarketOrderId   String?
-  assetId             String?
-  marketId            String?
-  message             String   @db.Text
-  detailsJson         String?  @db.Text
-  resolved            Boolean  @default(false)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                String   @id @default(cuid())
+  funderAddress     String
+  alertType         String
+  severity          String
+  polymarketOrderId String?
+  assetId           String?
+  marketId          String?
+  message           String
+  detailsJson       String?
+  resolved          Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([funderAddress])
   @@index([resolved])
@@ -233,22 +234,21 @@ model DriftAlert {
   @@index([createdAt])
 }
 
-// Alert Engine v1: proactive portfolio/recommendation alerts (deterministic, threshold-based).
 model CopilotAlert {
-  id                String   @id @default(cuid())
-  funderAddress     String
-  type              String   // CONCENTRATION_BREACH | NEW_ADD_OPPORTUNITY | NEAR_RESOLUTION_REVIEW | HELD_MARKET_SIGNAL_FLIP | DATA_HEALTH
-  severity          String   // info | warning | critical
-  title             String
-  message           String   @db.Text
-  marketId          String?
-  recommendationId  String?
-  assetId           String?
-  metadata          Json?
-  isRead            Boolean  @default(false)
-  dedupeKey         String   // stable key for dedupe: same (funder, type, dedupeKey) => no duplicate
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id               String   @id @default(cuid())
+  funderAddress    String
+  type             String
+  severity         String
+  title            String
+  message          String
+  marketId         String?
+  recommendationId String?
+  assetId          String?
+  metadata         Json?
+  isRead           Boolean  @default(false)
+  dedupeKey        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@index([funderAddress])
   @@index([type])
@@ -258,30 +258,19 @@ model CopilotAlert {
 }
 
 model WebsocketConnectionStatus {
-  id               String    @id @default(cuid())
-  funderAddress    String
-  channel          String    // user-feed | market-feed
-  connected        Boolean   @default(false)
-  lastHeartbeatAt  DateTime?
-  lastMessageAt    DateTime?
-  lastError        String?   @db.Text
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  id              String    @id @default(cuid())
+  funderAddress   String
+  channel         String
+  connected       Boolean   @default(false)
+  lastHeartbeatAt DateTime?
+  lastMessageAt   DateTime?
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@unique([funderAddress, channel])
   @@index([funderAddress])
   @@index([channel])
-}
-
-// Streaming Sync Layer v1: single row for health/status (lastEventAt, lastReconciliationAt, trackedAssetCount).
-model StreamSyncState {
-  id                    String    @id @default("default")
-  lastEventAt           DateTime?
-  lastReconciliationAt  DateTime?
-  trackedAssetCount     Int?
-  updatedAt             DateTime  @updatedAt
-
-  @@map("stream_sync_state")
 }
 
 model BehaviorFlag {
@@ -290,28 +279,45 @@ model BehaviorFlag {
   type          String
   severity      String
   marketTitle   String?
-  description   String   @db.Text
+  description   String
   metadata      Json?
+  /// automation | manual | portfolio | runtime — only automation+runtime affect behaviorPenalty for signals/paper.
+  sourceScope   String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@index([funderAddress])
+  @@index([funderAddress, sourceScope])
+}
+
+/// Debounced queue: BehaviorFlag (or sourceScope) changes mark dirty; worker runs signal/rec/decision refresh per funder.
+model FunderPolicyRefreshState {
+  funderAddress           String    @id
+  dirtyAt                 DateTime?
+  lastRefreshStartedAt    DateTime?
+  lastRefreshSuccessAt    DateTime?
+  lastRefreshError        String?   @db.Text
+  /// Set when reconcileStalePolicyFunders auto-enqueues (audit).
+  lastStaleEnqueueReason  String?
+  lastStaleEnqueueAt      DateTime?
+  updatedAt               DateTime  @updatedAt
 }
 
 model PortfolioSnapshot {
-  id                    String   @id @default(cuid())
-  funderAddress         String
-  totalOpenExposure     String
-  totalReservedExposure String
-  realizedPnl           String
-  unrealizedPnl         String
-  openPositionsCount    Int
-  openOrdersCount       Int
-  topConcentrationPct    String
-  yesExposure           String
-  noExposure            String
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                        String   @id @default(cuid())
+  funderAddress             String
+  totalOpenExposure         String
+  totalReservedExposure     String
+  realizedPnl               String
+  unrealizedPnl             String
+  openPositionsCount        Int
+  openOrdersCount           Int
+  topThemeConcentrationPct  String
+  yesExposure               String
+  noExposure                String
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  topMarketConcentrationPct String?
 
   @@index([funderAddress])
 }
@@ -330,101 +336,84 @@ model MarketPriceSnapshot {
   @@index([capturedAt])
 }
 
-model MarketRegimeSnapshot {
-  id           String   @id @default(cuid())
-  marketId     String
-  assetId      String
-  regime       String
-  featuresJson String   @db.Text
-  signalsJson  String   @db.Text
-  explanation  String?  @db.Text
-  createdAt    DateTime @default(now())
-
-  @@index([marketId])
-  @@index([marketId, assetId])
-  @@index([regime])
-  @@index([createdAt])
-}
-
 model MarketSignal {
-  id                  String   @id @default(cuid())
-  funderAddress       String
-  slug                String?
-  conditionId         String?
-  marketId            String
-  marketTitle         String
-  outcome             String
-  side                String
-  marketPrice         String
-  fairPrice           String
-  edge                String
-  confidence          String
-  momentumScore       String
-  liquidityScore      String
-  crowdingScore       String
-  portfolioPenalty    String
-  behaviorPenalty     String
-  momentumComponent   String?
-  liquidityComponent  String?
-  crowdingComponent   String?
-  portfolioComponent  String?
-  behaviorComponent   String?
-  longshotComponent   String?
-  timeComponent       String?
-  eventImpactBoost    String?
+  id                     String          @id @default(cuid())
+  funderAddress          String
+  slug                   String?
+  conditionId            String?
+  marketId               String
+  marketTitle            String
+  outcome                String
+  side                   String
+  marketPrice            String
+  fairPrice              String
+  edge                   String
+  confidence             String
+  momentumScore          String
+  liquidityScore         String
+  crowdingScore          String
+  portfolioPenalty       String
+  behaviorPenalty        String
+  momentumComponent      String?
+  liquidityComponent     String?
+  crowdingComponent      String?
+  portfolioComponent     String?
+  behaviorComponent      String?
+  longshotComponent      String?
+  timeComponent          String?
+  eventImpactBoost       String?
   narrativeMomentumBoost String?
-  catalystConfidence  String?
-  category            String
-  theme               String
-  signalType          String
-  thesis              String?  @db.Text
-  invalidation        String?  @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-  recommendation      Recommendation?
+  catalystConfidence     String?
+  category               String
+  theme                  String
+  signalType             String
+  thesis                 String?
+  invalidation           String?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+  recommendation         Recommendation?
 
   @@index([funderAddress])
   @@index([marketId])
 }
 
 model Recommendation {
-  id                 String   @id @default(cuid())
-  marketSignalId     String   @unique
-  marketSignal       MarketSignal @relation(fields: [marketSignalId], references: [id], onDelete: Cascade)
-  action             String
-  suggestedEntryMin  String?
-  suggestedEntryMax  String?
-  suggestedSize      String
-  blockedReason      String?
-  priorityScore      String
-  mlScore            String?
-  mlModelRunId       String?
-  // v2: portfolio-aware action and explainable fields (additive)
-  primaryActionType  String?  // add | review_existing | trim | hedge | avoid | monitor | sync_first
-  rationale          String?  @db.Text
-  portfolioImpact    String?  @db.Text
-  riskNote           String?  @db.Text
-  timingNote         String?  @db.Text
-  qualityBlocker     String?  @db.Text
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  evaluations        RecommendationEvaluation[]
-  review             RecommendationReview?
-  lifecycleEvents    RecommendationLifecycleEvent[]
-  executionOutcomes  RecommendationExecutionOutcome[]
-  decisionSnapshots  DecisionPolicySnapshot[]
+  id                String                           @id @default(cuid())
+  marketSignalId    String                           @unique
+  action            String
+  suggestedEntryMin String?
+  suggestedEntryMax String?
+  suggestedSize     String
+  blockedReason     String?
+  priorityScore     String
+  mlScore           String?
+  mlModelRunId      String?
+  createdAt         DateTime                         @default(now())
+  updatedAt         DateTime                         @updatedAt
+  primaryActionType String?
+  rationale         String?
+  portfolioImpact   String?
+  riskNote          String?
+  timingNote        String?
+  qualityBlocker    String?
+  decisionSnapshots DecisionPolicySnapshot[]
+  marketSignal      MarketSignal                     @relation(fields: [marketSignalId], references: [id], onDelete: Cascade)
+  evaluations       RecommendationEvaluation[]
+  executionOutcomes RecommendationExecutionOutcome[]
+  lifecycleEvents   RecommendationLifecycleEvent[]
+  review            RecommendationReview?
 
   @@index([marketSignalId])
 }
 
 model RecommendationLifecycleEvent {
-  id               String   @id @default(cuid())
+  id               String         @id @default(cuid())
   recommendationId String
-  recommendation   Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
   funderAddress    String
-  eventType       String   // SHOWN, REVIEWED, APPROVED, REJECTED, PREVIEWED, INTENT_CREATED, ORDER_PLACED, ORDER_CANCELLED, FILLED, SKIPPED
-  metadata        Json?
-  createdAt       DateTime @default(now())
+  eventType        String
+  metadata         Json?
+  createdAt        DateTime       @default(now())
+  recommendation   Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
 
   @@index([recommendationId])
   @@index([funderAddress])
@@ -433,30 +422,30 @@ model RecommendationLifecycleEvent {
 }
 
 model RecommendationExecutionOutcome {
-  id                  String   @id @default(cuid())
-  recommendationId    String
-  recommendation      Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  funderAddress       String
-  orderIntentId       String?
-  executedOrderId     String?
-  actedOn             Boolean  @default(false)
-  overridden          Boolean  @default(false)
-  matchedSuggestedSide Boolean?
-  matchedSuggestedSize Boolean?
+  id                    String         @id @default(cuid())
+  recommendationId      String
+  funderAddress         String
+  orderIntentId         String?
+  executedOrderId       String?
+  actedOn               Boolean        @default(false)
+  overridden            Boolean        @default(false)
+  matchedSuggestedSide  Boolean?
+  matchedSuggestedSize  Boolean?
   matchedSuggestedPrice Boolean?
-  suggestedSize       String?
-  actualSize          String?
-  suggestedPrice      String?
-  actualPrice         String?
-  slippage            String?
-  fillStatus          String?
-  forwardReturn1h     String?
-  forwardReturn6h     String?
-  forwardReturn24h    String?
-  pnlIfActed          String?
-  pnlIfIgnored        String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  suggestedSize         String?
+  actualSize            String?
+  suggestedPrice        String?
+  actualPrice           String?
+  slippage              String?
+  fillStatus            String?
+  forwardReturn1h       String?
+  forwardReturn6h       String?
+  forwardReturn24h      String?
+  pnlIfActed            String?
+  pnlIfIgnored          String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  recommendation        Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
 
   @@index([recommendationId])
   @@index([funderAddress])
@@ -465,13 +454,13 @@ model RecommendationExecutionOutcome {
 }
 
 model RecommendationReview {
-  id              String   @id @default(cuid())
-  recommendationId String   @unique
+  id               String         @id @default(cuid())
+  recommendationId String         @unique
+  status           String
+  reviewerNote     String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
   recommendation   Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  status          String
-  reviewerNote    String?  @db.Text
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
 
   @@index([recommendationId])
   @@index([status])
@@ -482,7 +471,7 @@ model MarketNote {
   funderAddress String
   marketId      String
   slug          String?
-  note          String   @db.Text
+  note          String
   tag           String
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -492,83 +481,138 @@ model MarketNote {
 }
 
 model RecommendationEvaluation {
-  id              String   @id @default(cuid())
-  recommendationId String
-  recommendation   Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  evaluatedAt     DateTime @default(now())
+  id                String         @id @default(cuid())
+  recommendationId  String
+  evaluatedAt       DateTime       @default(now())
   marketPriceAtEval String
-  priceChange1h   String?
-  priceChange6h   String?
-  priceChange24h  String?
-  wasPositive     Boolean?
-  metadata        Json?
-  createdAt       DateTime @default(now())
+  priceChange1h     String?
+  priceChange6h     String?
+  priceChange24h    String?
+  wasPositive       Boolean?
+  metadata          Json?
+  createdAt         DateTime       @default(now())
+  recommendation    Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
 
   @@index([recommendationId])
   @@index([evaluatedAt])
 }
 
+/// Durable order intent (API + future runtime). IdempotencyKey enables dedupe across retries/restarts.
 model OrderIntent {
-  id                String   @id @default(cuid())
-  funderAddress     String
-  recommendationId  String?
-  marketId          String
-  assetId           String
-  outcome           String
-  side              String
-  orderType         String
-  limitPrice        String
-  size              String
-  status            String
-  riskPreviewJson   String?  @db.Text
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  executedOrders    ExecutedOrder[]
+  id                          String             @id @default(cuid())
+  funderAddress               String
+  recommendationId            String?
+  marketId                    String
+  assetId                     String
+  outcome                     String
+  side                        String
+  orderType                   String
+  limitPrice                  String
+  size                        String
+  status                      String
+  riskPreviewJson             String?
+  createdAt                   DateTime           @default(now())
+  updatedAt                   DateTime           @updatedAt
+  source                      String?
+  idempotencyKey              String?
+  decisionSnapshotId          String?
+  riskCheckSnapshotJson       String?
+  executionPolicySnapshotJson String?
+  metadataJson                String?
+  executedOrders              ExecutedOrder[]
+  intentEvents                OrderIntentEvent[]
 
+  @@unique([funderAddress, idempotencyKey])
   @@index([funderAddress])
   @@index([recommendationId])
   @@index([status])
+  @@index([assetId])
+  @@index([marketId])
+  @@index([createdAt])
 }
 
+/// Append-only events for an order intent (created, gated, submitted, rejected, etc.). Audit and replay.
+model OrderIntentEvent {
+  id            String      @id @default(cuid())
+  orderIntentId String
+  eventType     String
+  payloadJson   String?
+  createdAt     DateTime    @default(now())
+  orderIntent   OrderIntent @relation(fields: [orderIntentId], references: [id], onDelete: Cascade)
+
+  @@index([orderIntentId])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+/// Durable record of an order sent to a venue. venueOrderId is venue-agnostic; polymarketOrderId is legacy.
 model ExecutedOrder {
-  id                  String   @id @default(cuid())
-  funderAddress       String
-  orderIntentId       String?
-  orderIntent         OrderIntent? @relation(fields: [orderIntentId], references: [id], onDelete: SetNull)
-  polymarketOrderId   String
-  marketId            String
-  assetId             String
-  side                String
-  price               String
-  size                String
-  status              String
-  rawJson             String?  @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                String               @id @default(cuid())
+  funderAddress     String
+  orderIntentId     String?
+  polymarketOrderId String
+  marketId          String
+  assetId           String
+  side              String
+  price             String
+  size              String
+  status            String
+  rawJson           String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  venue             String?
+  venueOrderId      String?              @unique
+  orderType         String?
+  originalSize      String?
+  remainingSize     String?
+  metadataJson      String?
+  cancelRequests    CancelRequest[]
+  orderIntent       OrderIntent?         @relation(fields: [orderIntentId], references: [id])
+  orderEvents       ExecutedOrderEvent[]
+  fillLedgerEntries FillLedgerEntry[]
+  replaceRequests   ReplaceRequest[]
 
   @@index([funderAddress])
   @@index([orderIntentId])
   @@index([polymarketOrderId])
+  @@index([venueOrderId])
+  @@index([assetId])
+  @@index([marketId])
+  @@index([status])
+  @@index([createdAt])
 }
 
-// Approval Queue v1: manual-approval layer between bot dry-run and (future) execution. No live execution in v1.
+/// Append-only events for an executed order (ack, fill, cancel, reject). Audit and replay.
+model ExecutedOrderEvent {
+  id              String        @id @default(cuid())
+  executedOrderId String
+  eventType       String
+  payloadJson     String?
+  createdAt       DateTime      @default(now())
+  executedOrder   ExecutedOrder @relation(fields: [executedOrderId], references: [id], onDelete: Cascade)
+
+  @@index([executedOrderId])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
 model ApprovalQueueEntry {
-  id                String   @id @default(cuid())
-  funderAddress     String
-  idempotencyKey    String   // recommendationId:assetId:side:size:limitPrice (matches bot executionKey)
-  recommendationId  String
-  marketId          String
-  assetId           String
-  outcome           String
-  side              String   // BUY | SELL
-  limitPrice        String
-  size              String
-  marketTitle       String?  @db.Text
-  status            String   // PENDING | APPROVED | REJECTED | CANCELLED | EXECUTED | FAILED
-  reason            String?  @db.Text
-  orderIntentId     String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id               String   @id @default(cuid())
+  funderAddress    String
+  idempotencyKey   String
+  recommendationId String
+  marketId         String
+  assetId          String
+  outcome          String
+  side             String
+  limitPrice       String
+  size             String
+  marketTitle      String?
+  status           String
+  reason           String?
+  orderIntentId    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@unique([funderAddress, idempotencyKey])
   @@index([funderAddress])
@@ -576,33 +620,16 @@ model ApprovalQueueEntry {
   @@index([recommendationId])
 }
 
-// Bot guardrail policy: single stored config (key = "default"). Fallback to DEFAULT_GUARDRAIL_CONFIG when absent.
-model TradingPolicyConfig {
-  id                        String   @id @default(cuid())
-  key                       String   @unique @default("default")
-  perMarketCapPct           Float    @default(50)
-  perThemeCapPct            Float    @default(50)
-  nearResolutionBlockHours  Float    @default(72)
-  allowNearResolutionAdd    Boolean  @default(false)
-  duplicateThesisThemeCapPct Float    @default(40)
-  blockStaleSync            Boolean  @default(true)
-  blockUnresolvedCatalog    Boolean  @default(true)
-  updatedAt                 DateTime @updatedAt
-
-  @@index([key])
-}
-
-// Log of manual execution attempts for approved queue entries (revalidation + placement).
 model BotQueueExecutionLog {
-  id                  String   @id @default(cuid())
-  queueEntryId        String
-  funderAddress       String
-  idempotencyKey      String
-  requestPayloadJson  String   @db.Text
-  resultStatus        String   // SUCCESS | FAILED
-  orderIntentId       String?
-  errorMessage        String?  @db.Text
-  createdAt           DateTime @default(now())
+  id                 String   @id @default(cuid())
+  queueEntryId       String
+  funderAddress      String
+  idempotencyKey     String
+  requestPayloadJson String
+  resultStatus       String
+  orderIntentId      String?
+  errorMessage       String?
+  createdAt          DateTime @default(now())
 
   @@index([queueEntryId])
   @@index([funderAddress])
@@ -614,7 +641,7 @@ model BotQueueExecutionLog {
 model TradePreflightCheck {
   id               String   @id @default(cuid())
   funderAddress    String
-  recommendationId  String?
+  recommendationId String?
   marketId         String
   assetId          String
   passed           Boolean  @default(false)
@@ -624,7 +651,7 @@ model TradePreflightCheck {
   marketActiveOk   Boolean?
   tickSizeOk       Boolean?
   feeKnown         Boolean?
-  warningsJson     String?  @db.Text
+  warningsJson     String?
   createdAt        DateTime @default(now())
 
   @@index([funderAddress])
@@ -633,18 +660,18 @@ model TradePreflightCheck {
 }
 
 model OrderReconciliationSnapshot {
-  id                  String   @id @default(cuid())
-  funderAddress       String
-  polymarketOrderId   String
-  localStatus         String
-  remoteStatus        String?
-  filledSize          String?
-  remainingSize       String?
-  avgFillPrice        String?
-  mismatch            Boolean  @default(false)
-  detailsJson         String?   @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                String   @id @default(cuid())
+  funderAddress     String
+  polymarketOrderId String
+  localStatus       String
+  remoteStatus      String?
+  filledSize        String?
+  remainingSize     String?
+  avgFillPrice      String?
+  mismatch          Boolean  @default(false)
+  detailsJson       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([funderAddress])
   @@index([polymarketOrderId])
@@ -660,7 +687,7 @@ model PostTradeJournalEntry {
   executedOrderId  String?
   marketId         String
   assetId          String
-  note             String   @db.Text
+  note             String
   tag              String
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -673,37 +700,36 @@ model PostTradeJournalEntry {
 }
 
 model NewsSource {
-  id               String    @id @default(cuid())
+  id               String     @id @default(cuid())
   name             String
   type             String
   baseUrl          String
-  credibilityScore Float     @default(0.5)
-  enabled          Boolean   @default(true)
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  credibilityScore Float      @default(0.5)
+  enabled          Boolean    @default(true)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
   items            NewsItem[]
 
   @@index([enabled])
 }
 
 model NewsItem {
-  id           String   @id @default(cuid())
+  id           String           @id @default(cuid())
   sourceId     String
-  source       NewsSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   url          String
   title        String
-  body         String?  @db.Text
-  summary      String?  @db.Text
+  body         String?
+  summary      String?
   publishedAt  DateTime?
-  fetchedAt    DateTime @default(now())
-  dedupeHash   String
-  language     String?  @default("en")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  marketLinks  MarketNewsLink[]
+  fetchedAt    DateTime         @default(now())
+  dedupeHash   String           @unique
+  language     String?          @default("en")
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
   eventSignals EventSignal[]
+  marketLinks  MarketNewsLink[]
+  source       NewsSource       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
-  @@unique([dedupeHash])
   @@index([sourceId])
   @@index([publishedAt])
 }
@@ -712,14 +738,14 @@ model MarketNewsLink {
   id              String   @id @default(cuid())
   marketId        String
   newsItemId      String
-  newsItem        NewsItem @relation(fields: [newsItemId], references: [id], onDelete: Cascade)
   relevanceScore  Float    @default(0)
   impactScore     Float    @default(0)
   noveltyScore    Float    @default(0)
   freshnessScore  Float    @default(0)
-  catalystSummary String?  @db.Text
+  catalystSummary String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  newsItem        NewsItem @relation(fields: [newsItemId], references: [id], onDelete: Cascade)
 
   @@unique([marketId, newsItemId])
   @@index([marketId])
@@ -727,24 +753,24 @@ model MarketNewsLink {
 }
 
 model EventSignal {
-  id                    String    @id @default(cuid())
-  newsItemId            String
-  newsItem              NewsItem  @relation(fields: [newsItemId], references: [id], onDelete: Cascade)
-  eventType             String    // sanctions | war_escalation | elections | central_bank | earnings | regulation | other
-  entityPrimary         String?
-  entitySecondary       String?
-  severity              String?   // low | medium | high | critical
-  sentiment             String?  // negative | neutral | positive
-  structuredDataJson    String?   @db.Text
-  sourceName            String?
-  sourceCredibility     Float?
-  extractionConfidence  Float?
-  noveltyScore          Float?
-  confirmationCount     Int?      @default(0)
-  isOfficialSource      Boolean?  @default(false)
-  occurredAt            DateTime?
-  createdAt             DateTime  @default(now())
-  marketEventLinks      MarketEventLink[]
+  id                   String            @id @default(cuid())
+  newsItemId           String
+  eventType            String
+  entityPrimary        String?
+  entitySecondary      String?
+  severity             String?
+  sentiment            String?
+  structuredDataJson   String?
+  sourceName           String?
+  sourceCredibility    Float?
+  extractionConfidence Float?
+  noveltyScore         Float?
+  confirmationCount    Int?              @default(0)
+  isOfficialSource     Boolean?          @default(false)
+  occurredAt           DateTime?
+  createdAt            DateTime          @default(now())
+  newsItem             NewsItem          @relation(fields: [newsItemId], references: [id], onDelete: Cascade)
+  marketEventLinks     MarketEventLink[]
 
   @@index([newsItemId])
   @@index([eventType])
@@ -753,28 +779,28 @@ model EventSignal {
 }
 
 model MarketEventLink {
-  id                            String   @id @default(cuid())
-  eventSignalId                 String
-  eventSignal                   EventSignal @relation(fields: [eventSignalId], references: [id], onDelete: Cascade)
-  marketId                      String
-  impactEstimate                Float    @default(0)  // -1 to 1 probability impact (blended for compatibility)
-  confidence                    Float    @default(0)  // 0 to 1
-  reasoningJson                 String?  @db.Text
-  instantImpact                 Float?
-  persistentImpact              Float?
-  decayHalfLifeMinutes          Int?
+  id                             String      @id @default(cuid())
+  eventSignalId                  String
+  marketId                       String
+  impactEstimate                 Float       @default(0)
+  confidence                     Float       @default(0)
+  reasoningJson                  String?
+  instantImpact                  Float?
+  persistentImpact               Float?
+  decayHalfLifeMinutes           Int?
   timeToFullIncorporationMinutes Int?
-  impactObserved5m              Float?
-  impactObserved30m             Float?
-  impactObserved2h              Float?
-  impactObserved24h             Float?
-  calibrationError5m           Float?
-  calibrationError30m          Float?
-  calibrationError2h           Float?
-  calibrationError24h          Float?
-  calibrationOutcomeIndex      Int?
-  calibrationConfidence        Float?
-  createdAt                     DateTime @default(now())
+  impactObserved5m               Float?
+  impactObserved30m              Float?
+  impactObserved2h               Float?
+  impactObserved24h              Float?
+  calibrationError5m             Float?
+  calibrationError30m            Float?
+  calibrationError2h             Float?
+  calibrationError24h            Float?
+  calibrationOutcomeIndex        Int?
+  calibrationConfidence          Float?
+  createdAt                      DateTime    @default(now())
+  eventSignal                    EventSignal @relation(fields: [eventSignalId], references: [id], onDelete: Cascade)
 
   @@index([eventSignalId])
   @@index([marketId])
@@ -783,11 +809,11 @@ model MarketEventLink {
 
 model NarrativeTrend {
   id              String   @id @default(cuid())
-  theme          String
-  eventType      String
+  theme           String
+  eventType       String
   articleCount24h Int      @default(0)
-  sentimentTrend  String?  // rising_negative | falling_negative | neutral | rising_positive | falling_positive
-  momentumScore   Float    @default(0)  // -1 to 1
+  sentimentTrend  String?
+  momentumScore   Float    @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -798,67 +824,142 @@ model NarrativeTrend {
 }
 
 model MlTrainingExample {
-  id                   String   @id @default(cuid())
-  recommendationId     String   @unique
-  funderAddress        String
-  signalType           String?
-  action               String?
-  reviewStatus         String?
-  category             String?
-  theme                String?
-  marketPrice          String
-  fairPrice            String
-  edge                 String
-  confidence           String
-  momentumComponent    String?
-  liquidityComponent   String?
-  crowdingComponent   String?
-  portfolioComponent   String?
-  behaviorComponent    String?
-  longshotComponent    String?
-  timeComponent        String?
-  themeExposurePct     String?
-  topConcentrationPct  String?
-  hasExistingPosition  Boolean  @default(false)
-  reservedExposure     String?
-  linkedNewsCount      Int      @default(0)
-  newsFreshnessScore   String?
-  newsCredibilityScore String?
-  noveltyScore         String?
-  saturationScore      String?
-  catalystBoost        String?
-  forwardReturn1h      String?
-  forwardReturn6h      String?
-  forwardReturn24h     String?
-  labelPositive1h      Boolean?
-  labelPositive6h      Boolean?
-  labelPositive24h     Boolean?
-  priorityScore        String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                        String   @id @default(cuid())
+  recommendationId          String   @unique
+  funderAddress             String
+  signalType                String?
+  action                    String?
+  reviewStatus              String?
+  category                  String?
+  theme                     String?
+  marketPrice               String
+  fairPrice                 String
+  edge                      String
+  confidence                String
+  momentumComponent         String?
+  liquidityComponent        String?
+  crowdingComponent         String?
+  portfolioComponent        String?
+  behaviorComponent         String?
+  longshotComponent         String?
+  timeComponent             String?
+  themeExposurePct          String?
+  topThemeConcentrationPct  String?
+  hasExistingPosition       Boolean  @default(false)
+  reservedExposure          String?
+  linkedNewsCount           Int      @default(0)
+  newsFreshnessScore        String?
+  newsCredibilityScore      String?
+  noveltyScore              String?
+  saturationScore           String?
+  catalystBoost             String?
+  forwardReturn1h           String?
+  forwardReturn6h           String?
+  forwardReturn24h          String?
+  labelPositive1h           Boolean?
+  labelPositive6h           Boolean?
+  labelPositive24h          Boolean?
+  priorityScore             String?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+  topMarketConcentrationPct String?
 
   @@index([funderAddress])
   @@index([labelPositive6h])
   @@index([labelPositive24h])
 }
 
+/// Shadow-candidate ML training examples. Source: ShadowCandidate + snapshots; labels from markouts/outcomeClassification.
+/// Separate from MlTrainingExample (recommendation-centric) to avoid ambiguity; used for bot-improvement ML only.
+model MlShadowTrainingExample {
+  id                                 String   @id @default(cuid())
+  shadowCandidateId                  String   @unique
+  funderAddress                      String
+  recommendationId                   String?
+  orderIntentId                      String?
+  assetId                            String
+  marketId                           String?
+  candidateSource                    String   @default("runtime_automated")
+  createdAt                          DateTime @default(now())
+  updatedAt                          DateTime @updatedAt
+  policyState                        String?
+  sizeMultiplier                     String?
+  finalSuggestedSize                 String?
+  eligibilityBlockersCount           Int      @default(0)
+  reducedSizeIndicator               Boolean  @default(false)
+  blockedIndicator                   Boolean  @default(false)
+  executionAllow                     Boolean?
+  executionBlockingReasonGroups      String?
+  executionWarningCount              Int      @default(0)
+  qualityState                       String?
+  spreadBps                          String?
+  estimatedSlippage                  String?
+  depthSufficiency                   String?
+  quoteFreshnessState                String?
+  tradable                           Boolean?
+  grossExposure                      String?
+  totalOpenExposure                  String?
+  workingOrderExposure               String?
+  maxSingleMarketConcentrationPct    String?
+  maxSingleThemeConcentrationPct     String?
+  worstCaseLossEstimate              String?
+  nearResolutionExposure             String?
+  illiquidExposureEstimate           String?
+  correlatedExposureEstimate         String?
+  portfolioRiskFlagsCount            Int      @default(0)
+  runtimeSafetyState                 String?
+  runtimeWarningCount                Int      @default(0)
+  runtimeBlockingCount               Int      @default(0)
+  side                               String
+  intendedPrice                      String
+  intendedSize                       String
+  recommendationPresent              Boolean  @default(false)
+  outcomeBlockedVsAllowedVsSubmitted String?
+  markout1h                          String?
+  markout6h                          String?
+  markout24h                         String?
+  outcomeClassification              String?
+  wasBlocked                         Boolean  @default(false)
+  wasSubmitted                       Boolean  @default(false)
+  wasFilled                          Boolean?
+  labelGoodDecision                  Boolean?
+  labelBadDecision                   Boolean?
+  labelMissedOpportunity             Boolean?
+  labelExecutionUnsafe               Boolean?
+  markout12h                         String?
+  labelGoodDecision6h                Boolean?
+  labelGoodDecision12h               Boolean?
+  momentum1hBps                      String?
+  momentum6hBps                      String?
+  volatility1hBps                    String?
+  volatility6hBps                    String?
+  distanceFromMid                    String?
+  timeToCloseHours                   String?
+  liquidityTrend                     String?
+
+  @@index([funderAddress])
+  @@index([createdAt])
+  @@index([outcomeClassification])
+  @@index([funderAddress, createdAt])
+}
+
 model MlModelRun {
-  id               String    @id @default(cuid())
-  modelType        String
-  targetLabel      String
-  featureSetName   String
-  status           String    @default("TRAINED")  // TRAINED | VALIDATED | APPROVED | REJECTED | ACTIVE
-  trainCount       Int?
-  validationCount  Int?
-  trainedFrom      DateTime?
-  trainedTo        DateTime?
-  validatedFrom    DateTime?
-  validatedTo      DateTime?
-  metricsJson      String?   @db.Text
-  artifactPath     String?
-  leakageCheckPassed Boolean?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  id                     String                  @id @default(cuid())
+  modelType              String
+  targetLabel            String
+  featureSetName         String
+  status                 String                  @default("TRAINED")
+  trainCount             Int?
+  validationCount        Int?
+  trainedFrom            DateTime?
+  trainedTo              DateTime?
+  validatedFrom          DateTime?
+  validatedTo            DateTime?
+  metricsJson            String?
+  artifactPath           String?
+  leakageCheckPassed     Boolean?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
   recommendationMlScores RecommendationMlScore[]
 
   @@index([modelType])
@@ -867,17 +968,16 @@ model MlModelRun {
   @@index([createdAt])
 }
 
-// Source of truth for ML scores per recommendation per model run (out-of-sample / live scoring).
 model RecommendationMlScore {
-  id               String   @id @default(cuid())
+  id               String     @id @default(cuid())
   recommendationId String
   mlModelRunId     String
-  mlModelRun       MlModelRun @relation(fields: [mlModelRunId], references: [id], onDelete: Cascade)
-  score            String   // predicted probability
+  score            String
   featureSetName   String
-  scoredAt         DateTime @default(now())
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  scoredAt         DateTime   @default(now())
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  mlModelRun       MlModelRun @relation(fields: [mlModelRunId], references: [id], onDelete: Cascade)
 
   @@unique([recommendationId, mlModelRunId])
   @@index([recommendationId])
@@ -886,17 +986,17 @@ model RecommendationMlScore {
 }
 
 model DecisionPolicySnapshot {
-  id                  String   @id @default(cuid())
-  recommendationId    String
-  recommendation      Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  id                 String         @id @default(cuid())
+  recommendationId   String
   funderAddress      String
-  policyState         String   // BLOCK | REVIEW_REQUIRED | ALLOW_SMALL | ALLOW_NORMAL | ALLOW_HIGH_CONVICTION | TRIM | EXIT
-  blendedScore        String
-  sizeMultiplier      String
-  finalSuggestedSize  String
-  reasoningJson      String?   @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  policyState        String
+  blendedScore       String
+  sizeMultiplier     String
+  finalSuggestedSize String
+  reasoningJson      String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  recommendation     Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
 
   @@unique([recommendationId, funderAddress])
   @@index([recommendationId])
@@ -905,19 +1005,19 @@ model DecisionPolicySnapshot {
 }
 
 model SetupPerformanceProfile {
-  id                   String   @id @default(cuid())
-  signalType           String?
-  category             String?
-  theme                String?
-  reviewStatus         String?
-  sampleCount          Int      @default(0)
-  actedWinRate         Float?
-  ignoredWinRate       Float?
-  avgForwardReturn6h   Float?
-  avgForwardReturn24h  Float?
-  overrideWinRate      Float?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                  String   @id @default(cuid())
+  signalType          String?
+  category            String?
+  theme               String?
+  reviewStatus        String?
+  sampleCount         Int      @default(0)
+  actedWinRate        Float?
+  ignoredWinRate      Float?
+  avgForwardReturn6h  Float?
+  avgForwardReturn24h Float?
+  overrideWinRate     Float?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   @@index([signalType])
   @@index([category])
@@ -926,15 +1026,15 @@ model SetupPerformanceProfile {
 }
 
 model SyncJobStatus {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   jobType      String
   status       String
-  startedAt    DateTime @default(now())
+  startedAt    DateTime  @default(now())
   finishedAt   DateTime?
-  errorMessage String?  @db.Text
+  errorMessage String?
   metadata     Json?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@index([jobType])
   @@index([jobType, status])
@@ -943,37 +1043,302 @@ model SyncJobStatus {
 
 model WorkerHeartbeat {
   id           String   @id @default(cuid())
-  workerName   String
-  status       String   // running | idle
+  workerName   String   @unique
+  status       String
   lastSeenAt   DateTime
-  metadataJson String?  @db.Text
+  metadataJson String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  @@unique([workerName])
   @@index([workerName])
   @@index([lastSeenAt])
 }
 
+/// Single row (id = "default") for operator control of runtime. Worker polls and clears flags after acting.
+model RuntimeControl {
+  id                       String   @id @default("default")
+  clearGlobalStopRequested Boolean  @default(false)
+  updatedAt                DateTime @updatedAt
+}
+
 model ScheduledJobRun {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   jobName      String
-  status       String   // running | success | failure | idle
+  status       String
   startedAt    DateTime
   finishedAt   DateTime?
   durationMs   Int?
-  errorMessage String?  @db.Text
-  metadataJson String?  @db.Text
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  errorMessage String?
+  metadataJson String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@index([jobName])
   @@index([jobName, status])
   @@index([startedAt])
 }
 
+/// Per-job lease to enforce non-overlap across processes.
+/// Only the lease holder may execute the job. Leases expire automatically so stuck runners can be recovered.
+model ScheduledJobLease {
+  jobName           String   @id
+  leaseId           String
+  leasedAt          DateTime
+  leaseExpiresAt    DateTime
+  lastHeartbeatAt   DateTime
+  lastRunId         String?
+  lastRecoveredAt   DateTime?
+  lastRecoveredRunId String?
+  updatedAt         DateTime @updatedAt
+
+  @@index([leaseExpiresAt])
+  @@index([lastHeartbeatAt])
+}
+
 model Placeholder {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model TradingPolicyConfig {
+  id                         String   @id
+  key                        String   @unique @default("default")
+  perMarketCapPct            Float    @default(50)
+  perThemeCapPct             Float    @default(50)
+  nearResolutionBlockHours   Float    @default(72)
+  allowNearResolutionAdd     Boolean  @default(false)
+  duplicateThesisThemeCapPct Float    @default(40)
+  blockStaleSync             Boolean  @default(true)
+  blockUnresolvedCatalog     Boolean  @default(true)
+  updatedAt                  DateTime
+
+  @@index([key])
+}
+
+model stream_sync_state {
+  id                   String    @id @default("default")
+  lastEventAt          DateTime?
+  lastReconciliationAt DateTime?
+  trackedAssetCount    Int?
+  updatedAt            DateTime
+}
+
+/// Durable fill ledger: one row per exchange fill/trade. Source of truth for replay safety across restarts.
+/// Prevents double-apply of position updates when the same fill is re-delivered (e.g. after reconnect).
+/// Durable fill ledger: one row per venue fill. Dedupe by exchangeFillId (legacy) or venueTradeId. Replay-safe.
+model FillLedgerEntry {
+  id                       String         @id @default(cuid())
+  funderAddress            String
+  exchangeFillId           String
+  clientOrderId            String?
+  exchangeOrderId          String?
+  assetId                  String
+  marketId                 String
+  side                     String
+  size                     Float
+  price                    Float
+  filledAt                 DateTime
+  source                   String
+  appliedToRuntimePosition Boolean        @default(false)
+  appliedAt                DateTime?
+  payloadJson              String?
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+  executedOrderId          String?
+  orderIntentId            String?
+  venueTradeId             String?        @unique
+  fillPrice                Float?
+  fillSize                 Float?
+  fee                      Float?
+  fillTimestamp            DateTime?
+  appliedToPosition        Boolean        @default(false)
+  rawPayloadJson           String?
+  executedOrder            ExecutedOrder? @relation(fields: [executedOrderId], references: [id])
+
+  @@unique([funderAddress, exchangeFillId])
+  @@index([funderAddress])
+  @@index([appliedToRuntimePosition])
+  @@index([funderAddress, appliedToRuntimePosition])
+  @@index([executedOrderId])
+  @@index([orderIntentId])
+  @@index([venueTradeId])
+  @@index([assetId])
+  @@index([marketId])
+  @@index([filledAt])
+}
+
+/// Durable cancel request: record of a cancel sent to venue. Status and optional venueRequestId.
+model CancelRequest {
+  id              String        @id @default(cuid())
+  executedOrderId String
+  status          String
+  reason          String?
+  venueRequestId  String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  executedOrder   ExecutedOrder @relation(fields: [executedOrderId], references: [id], onDelete: Cascade)
+
+  @@index([executedOrderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Durable replace (cancel-replace) request: record of a replace sent to venue.
+model ReplaceRequest {
+  id              String        @id @default(cuid())
+  executedOrderId String
+  newPrice        String?
+  newSize         String?
+  status          String
+  reason          String?
+  venueRequestId  String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  executedOrder   ExecutedOrder @relation(fields: [executedOrderId], references: [id], onDelete: Cascade)
+
+  @@index([executedOrderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Append-only order lifecycle journal. Every meaningful transition is durably recorded for audit and replay.
+model OrderLifecycleJournalEntry {
+  id              String   @id @default(cuid())
+  funderAddress   String
+  clientOrderId   String?
+  exchangeOrderId String?
+  intentId        String?
+  assetId         String
+  marketId        String
+  side            String
+  eventType       String
+  eventSequence   Int      @default(0)
+  payloadJson     String?
+  metadataJson    String?
+  occurredAt      DateTime
+  createdAt       DateTime @default(now())
+
+  @@index([funderAddress])
+  @@index([clientOrderId])
+  @@index([exchangeOrderId])
+  @@index([funderAddress, clientOrderId])
+  @@index([createdAt])
+  @@index([funderAddress, createdAt])
+}
+
+/// Shadow-mode telemetry: every trade candidate (blocked or allowed) for post-trade evaluation.
+model ShadowCandidate {
+  id                           String    @id @default(cuid())
+  funderAddress                String
+  recommendationId             String?
+  orderIntentId                String?
+  assetId                      String
+  marketId                     String?
+  side                         String
+  intendedPrice                String
+  intendedSize                 String
+  candidateSource              String    @default("runtime_automated")
+  decisionSnapshotJson         String?
+  executionPolicySnapshotJson  String?
+  executionQualitySnapshotJson String?
+  portfolioRiskSnapshotJson    String?
+  runtimeSafetySnapshotJson    String?
+  wasBlocked                   Boolean   @default(false)
+  blockingReasons              Json?
+  wasSubmitted                 Boolean   @default(false)
+  wasFilled                    Boolean?
+  createdAt                    DateTime  @default(now())
+  evaluatedAt                  DateTime?
+  markout1h                    String?
+  markout6h                    String?
+  markout24h                   String?
+  outcomeClassification        String?
+  evaluationNotes              String?
+
+  @@index([funderAddress])
+  @@index([createdAt])
+  @@index([evaluatedAt])
+  @@index([wasBlocked])
+  @@index([candidateSource])
+}
+
+/// Paper trading: shadow-ML scored trades (no real orders). Open when score >= threshold; close after 12h with markout.
+model PaperTrade {
+  id                      String    @id @default(cuid())
+  modelRunId              String
+  marketId                String
+  assetId                 String
+  funderAddress           String?   @default("paper")
+  side                    String
+  score                   Float
+  threshold               Float
+  entryPrice              String
+  entryTime               DateTime
+  intendedSize            String
+  status                  String    @default("open")
+  exitPrice               String?
+  exitTime                DateTime?
+  markout12h              String?
+  pnlPct                  String?
+  pnlDollars              String?
+  metadataJson            String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+  dedupeKey               String    @unique
+  theme                   String?
+  category                String?
+  /// Paper-only relaxation: source staged decision state (e.g. BLOCK).
+  sourceDecisionState     String?
+  /// Paper-only: normal | relaxed_block_candidate.
+  paperPolicyMode         String?
+  /// When paperPolicyMode=relaxed_block_candidate: edge_too_small | liquidity_too_low | multi_allowed.
+  paperRelaxationReason   String?
+  /// Original blocking reasons from staged decision (JSON array of strings).
+  originalBlockingReasons Json?
+  /// Paper eligibility version (e.g. paper_relax_v1).
+  paperEligibilityVersion String?
+  /// Multi-bot paper profile key (strict_quality | relaxed_edge | tail_extremes | default).
+  botType                 String    @default("default")
+  botVersion              String?
+  targetLabel             String?
+  entryPriceBand          String?
+  championModelRunId      String?
+  challengerModelRunId    String?
+  championScore           Float?
+  challengerScore         Float?
+  challengerScoreDelta    Float?
+  challengerAvailable     Boolean?
+  /// threshold | exploration (paper-only exploration allocator).
+  explorationAdmissionMode String   @default("threshold")
+  /// JSON snapshot of effective bot profile at admission (governance / caps).
+  profileSnapshotJson     String?
+
+  @@index([modelRunId])
+  @@index([marketId])
+  @@index([assetId])
+  @@index([status])
+  @@index([entryTime])
+  @@index([createdAt])
+  @@index([assetId, status])
+  @@index([theme])
+  @@index([category])
+  @@index([paperPolicyMode])
+  @@index([botType])
+  @@index([botType, status])
+  @@index([botType, marketId])
+  @@index([botType, theme])
+  @@index([botType, category])
+}
+
+/// Single row (id = "default") for paper trading tick/close state and last result.
+model PaperTradingState {
+  id                      String    @id
+  lastOpenTickAt          DateTime?
+  lastOpenTickResultJson  String?
+  lastOpenTickError       String?
+  lastCloseTickAt         DateTime?
+  lastCloseTickResultJson String?
+  lastCloseTickError      String?
+  updatedAt               DateTime  @updatedAt
 }

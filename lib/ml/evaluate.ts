@@ -44,7 +44,8 @@ function f1(p: number, r: number): number {
 }
 
 /**
- * ROC-AUC via trapezoidal rule on (FPR, TPR) curve. Assumes probas and y are same length.
+ * ROC-AUC: P(random positive has higher score than random negative).
+ * Positive class is y=1. Sorts by probas ascending; for each negative, counts positives ranked above it.
  */
 function rocAuc(probas: number[], y: number[]): number {
   const n = probas.length;
@@ -58,7 +59,7 @@ function rocAuc(probas: number[], y: number[]): number {
   for (let i = 0; i < n; i++) {
     const idx = order[i];
     if (y[idx] === 1) posBelow++;
-    else auc += posBelow / totalPos / totalNeg;
+    else auc += (totalPos - posBelow) / totalPos / totalNeg;
   }
   return auc;
 }

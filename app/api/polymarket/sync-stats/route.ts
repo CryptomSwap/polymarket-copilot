@@ -48,7 +48,7 @@ export async function GET() {
 
     let credentialsValidated = false;
     if (credentialsExist) {
-      const creds = await getStoredCredentials();
+      const { credential: creds } = await getStoredCredentials();
       if (creds) {
         const result = await validateCredentialsWithClob(
           {

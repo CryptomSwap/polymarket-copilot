@@ -1,0 +1,63 @@
+services:
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-polymarket_copilot}
+    volumes:
+      - polymarket_postgres_data:/var/lib/postgresql/data
+    # No localhost port mapping by default to avoid collisions with existing local Postgres.
+    # Access is via the `postgres` service hostname when the profile is enabled.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    env_file:
+      - .env
+    environment:
+      # Ensure DB hostname works *inside* containers.
+      # Default to the compose-managed Postgres service hostname so container-to-container
+      # connectivity works on Windows Docker Desktop without relying on host.docker.internal.
+      # If you use an external Postgres, set DATABASE_URL_DOCKER in .env to override this.
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://postgres:postgres@postgres:5432/polymarket_copilot?schema=public}
+      PORT: "3000"
+      USE_STREAM_RUNTIME: ${USE_STREAM_RUNTIME:-true}
+      RUNTIME_MODE: ${RUNTIME_MODE:-paper}
+      CHOKIDAR_USEPOLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file:
+      - .env
+    environment:
+      # Default to the compose-managed Postgres service hostname; override with DATABASE_URL_DOCKER for external Postgres.
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://postgres:postgres@postgres:5432/polymarket_copilot?schema=public}
+      USE_STREAM_RUNTIME: ${USE_STREAM_RUNTIME:-true}
+      RUNTIME_MODE: ${RUNTIME_MODE:-paper}
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  polymarket_postgres_data:
+

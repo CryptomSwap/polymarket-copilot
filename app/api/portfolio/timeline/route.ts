@@ -1,14 +1,29 @@
 import { NextResponse } from "next/server";
 import { getFunderForRecompute } from "@/lib/polymarket/recompute";
-import { getPortfolioTimeline } from "@/lib/portfolio/timeline";
+import { getPortfolioTimeline, type TimelineSourceFilter } from "@/lib/portfolio/timeline";
 
 export const dynamic = "force-dynamic";
 
+const SOURCE_VALUES: TimelineSourceFilter[] = [
+  "all",
+  "drift",
+  "behavior",
+  "recommendation",
+  "execution",
+  "reconciliation",
+  "journal",
+  "copilot",
+];
+
 /**
  * GET /api/portfolio/timeline
- * Returns a reverse-chronological feed of portfolio events: position opened/increased/reduced,
- * recommendation created/lifecycle, alerts, portfolio snapshots.
- * Query: limit (default 80), from (ISO), to (ISO).
+ * Returns a reverse-chronological feed of portfolio events from persisted sources.
+ * Deterministic, read-only. No new tables.
+ *
+ * Query params:
+ * - limit (default 100, max 200)
+ * - since (ISO date): only events with createdAt >= since
+ * - source: all | drift | behavior | recommendation | execution | reconciliation | journal | copilot
  */
 export async function GET(request: Request) {
   const funder = await getFunderForRecompute();
@@ -20,22 +35,25 @@ export async function GET(request: Request) {
   }
 
   const { searchParams } = new URL(request.url);
-  const limit = Math.min(Number(searchParams.get("limit")) || 80, 200);
-  let from: Date | undefined;
-  let to: Date | undefined;
-  const fromParam = searchParams.get("from");
-  const toParam = searchParams.get("to");
-  if (fromParam) {
-    const t = new Date(fromParam);
-    if (Number.isFinite(t.getTime())) from = t;
+  const limitParam = searchParams.get("limit");
+  const limit = Math.min(
+    Number(limitParam) || 100,
+    200
+  );
+  let since: Date | undefined;
+  const sinceParam = searchParams.get("since");
+  if (sinceParam) {
+    const t = new Date(sinceParam);
+    if (Number.isFinite(t.getTime())) since = t;
   }
-  if (toParam) {
-    const t = new Date(toParam);
-    if (Number.isFinite(t.getTime())) to = t;
+  let source: TimelineSourceFilter = "all";
+  const sourceParam = searchParams.get("source");
+  if (sourceParam && SOURCE_VALUES.includes(sourceParam as TimelineSourceFilter)) {
+    source = sourceParam as TimelineSourceFilter;
   }
 
   try {
-    const events = await getPortfolioTimeline(funder, { limit, from, to });
+    const events = await getPortfolioTimeline(funder, { limit, since, source });
     return NextResponse.json({ events });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

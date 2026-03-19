@@ -19,6 +19,8 @@ import {
   toPositionViewFromCanonical,
   type PositionView,
 } from "@/lib/portfolio/position-display";
+import { useLivePortfolioPolling } from "@/hooks/use-live-portfolio-polling";
+import { PortfolioFreshnessIndicator } from "@/components/portfolio/portfolio-freshness-indicator";
 
 // Canonical position view (from GET /api/portfolio/positions?canonical=true)
 interface CanonicalPositionMarket {
@@ -58,9 +60,13 @@ interface CanonicalPositionTiming {
 }
 
 interface CanonicalPositionQuality {
+  /** True when linked to canonical market record. */
   isResolved: boolean;
   matchedBy: "marketId" | "conditionId" | "assetId" | null;
-  hasFullMarketMetadata: boolean;
+  /** True when all required display metadata present. */
+  hasCompleteDisplayMetadata?: boolean;
+  /** True when market end date is in the past (for time-to-resolution display). */
+  marketEndDatePassed?: boolean;
   hasPriceContext: boolean;
   warnings: string[];
 }
@@ -99,6 +105,25 @@ interface CanonicalPositionWithMeta extends CanonicalPositionView {
   decision: PositionDecision | null;
   newsLinkCount?: number;
   thesis?: PositionThesisMeta | null;
+}
+
+/** Shape returned by positions + alerts polling for live portfolio page */
+interface PositionsPollingData {
+  positions: CanonicalPositionWithMeta[];
+  /** False when GET /api/portfolio/positions returned non-OK (e.g. 500). Use to show error instead of "No positions". */
+  positionsFetchOk?: boolean;
+  sourceOfTruth?: string;
+  asOf?: string;
+  freshnessMs?: number | null;
+  alerts: Array<{
+    id: string;
+    message: string;
+    severity: string;
+    assetId: string | null;
+    marketId: string | null;
+    source?: "drift" | "engine";
+    title?: string;
+  }>;
 }
 
 function formatUsd(val: string): string {
@@ -140,56 +165,105 @@ function formatRelativeDate(iso: string | null): string {
 }
 
 export default function PortfolioPage() {
-  const [positions, setPositions] = useState<CanonicalPositionWithMeta[]>([]);
-  const [loading, setLoading] = useState(true);
   const [recomputing, setRecomputing] = useState(false);
   const [recomputingDecisions, setRecomputingDecisions] = useState(false);
   const [selectedPosition, setSelectedPosition] = useState<CanonicalPositionWithMeta | null>(null);
   const [detailPosition, setDetailPosition] = useState<CanonicalPositionWithMeta | null>(null);
-  const [positionAlerts, setPositionAlerts] = useState<Array<{ id: string; message: string; severity: string; assetId: string | null; marketId: string | null }>>([]);
   const detailPositionRef = useRef<CanonicalPositionWithMeta | null>(null);
   detailPositionRef.current = detailPosition;
 
-  const fetchPositions = useCallback(async () => {
-    try {
-      const [posRes, alertsRes] = await Promise.all([
-        fetch("/api/portfolio/positions?canonical=true"),
-        fetch("/api/live/alerts?resolved=false&limit=50"),
-      ]);
-      if (posRes.ok) {
-        const data = await posRes.json();
-        const posList = data.positions ?? [];
-        setPositions(posList);
-        const currentDetail = detailPositionRef.current;
-        if (currentDetail) {
-          const updated = posList.find((p: CanonicalPositionWithMeta) => p.token?.assetId === currentDetail?.token?.assetId);
-          if (updated) setDetailPosition(updated);
+  const fetchPositionsFn = useCallback(async (): Promise<PositionsPollingData> => {
+    const [posRes, alertsRes] = await Promise.all([
+      fetch("/api/portfolio/positions?canonical=true"),
+      fetch("/api/alerts/feed?resolved=false&limit=50&source=all"),
+    ]);
+    const posData = posRes.ok ? await posRes.json() : { positions: [] };
+    const posList = posData.positions ?? [];
+    const positionsFetchOk = posRes.ok;
+    let alerts: PositionsPollingData["alerts"] = [];
+    if (alertsRes.ok) {
+      const { alerts: raw } = await alertsRes.json();
+      const assetIds = new Set(posList.map((p: CanonicalPositionWithMeta) => p.token?.assetId));
+      const marketIds = new Set(
+        posList.map((p: CanonicalPositionWithMeta) =>
+          p.positionView?.syncedMarketId ?? p.market?.id ?? p.rawMarketRef ?? p.rawMarketId ?? p.id
+        )
+      );
+      const feedItems = raw ?? [];
+      const affecting = feedItems.filter(
+        (a: { entityRefs?: { assetId?: string | null; marketId?: string | null } }) => {
+          const refs = a.entityRefs ?? {};
+          const aid = refs.assetId ?? (a as { assetId?: string | null }).assetId;
+          const mid = refs.marketId ?? (a as { marketId?: string | null }).marketId;
+          return (aid && assetIds.has(aid)) || (mid && marketIds.has(mid));
         }
-        if (alertsRes.ok) {
-          const { alerts } = await alertsRes.json();
-          const assetIds = new Set(posList.map((p: CanonicalPositionWithMeta) => p.token.assetId));
-          const marketIds = new Set(
-            posList.map((p: CanonicalPositionWithMeta) =>
-              p.positionView?.syncedMarketId ?? p.market?.id ?? p.rawMarketRef ?? p.rawMarketId ?? p.id
-            )
-          );
-          const affecting = (alerts ?? []).filter(
-            (a: { assetId?: string | null; marketId?: string | null }) =>
-              (a.assetId && assetIds.has(a.assetId)) || (a.marketId && marketIds.has(a.marketId))
-          );
-          setPositionAlerts(affecting.map((a: { id: string; message: string; severity: string; assetId: string | null; marketId: string | null }) => ({ id: a.id, message: a.message, severity: a.severity, assetId: a.assetId ?? null, marketId: a.marketId ?? null })));
-        } else setPositionAlerts([]);
-      } else setPositions([]);
-    } catch {
-      setPositions([]);
-    } finally {
-      setLoading(false);
+      );
+      // Include all engine alerts (no entityRefs) so we show concentration, near-resolution, etc.
+      const engineOnly = feedItems.filter(
+        (a: { source?: string; entityRefs?: unknown }) => a.source === "engine"
+      );
+      const combined = [...new Map([...affecting, ...engineOnly].map((a: { id: string }) => [a.id, a])).values()];
+      alerts = combined.map(
+        (a: {
+          id: string;
+          message: string;
+          severity: string;
+          title?: string;
+          source?: "drift" | "engine";
+          entityRefs?: { assetId?: string | null; marketId?: string | null };
+        }) => ({
+          id: a.id,
+          message: a.message,
+          severity: a.severity,
+          title: a.title,
+          source: a.source,
+          assetId: a.entityRefs?.assetId ?? null,
+          marketId: a.entityRefs?.marketId ?? null,
+        })
+      );
     }
+    return {
+      positions: posList,
+      positionsFetchOk,
+      sourceOfTruth: posData.sourceOfTruth,
+      asOf: posData.asOf,
+      freshnessMs: posData.freshnessMs ?? null,
+      alerts,
+    };
   }, []);
 
+  const {
+    data: pollingData,
+    loading,
+    refresh: fetchPositions,
+    isRefreshing,
+  } = useLivePortfolioPolling<PositionsPollingData>(fetchPositionsFn, {
+    intervalMs: 10_000,
+    refetchOnFocus: true,
+    preventOverlap: true,
+  });
+
+  const positions = pollingData?.positions ?? [];
+  const positionAlerts = pollingData?.alerts ?? [];
+
+  // Keep detail drawer and exit modal in sync with current list: update when position still present, clear when removed (e.g. stale row excluded)
+  const detailAssetId = detailPosition?.token?.assetId;
+  const selectedAssetId = selectedPosition?.token?.assetId;
   useEffect(() => {
-    fetchPositions();
-  }, [fetchPositions]);
+    if (!detailAssetId) return;
+    if (positions.length === 0) {
+      setDetailPosition(null);
+      return;
+    }
+    const updated = positions.find((p) => p.token?.assetId === detailAssetId);
+    if (updated) setDetailPosition(updated);
+    else setDetailPosition(null);
+  }, [positions, detailAssetId]);
+  useEffect(() => {
+    if (!selectedAssetId) return;
+    const stillInList = positions.some((p) => p.token?.assetId === selectedAssetId);
+    if (!stillInList) setSelectedPosition(null);
+  }, [positions, selectedAssetId]);
 
   const runRecompute = async () => {
     setRecomputing(true);
@@ -222,9 +296,28 @@ export default function PortfolioPage() {
           <p className="text-muted-foreground text-sm">
             Derived positions from synced fills. Data quality and resolution status shown per position.
           </p>
-          <Link href="/portfolio/timeline" className="text-sm text-primary hover:underline inline-block mt-1">
-            View portfolio timeline →
-          </Link>
+          <div className="flex flex-wrap items-center gap-2 mt-1">
+            <Link href="/portfolio/timeline" className="text-sm text-primary hover:underline">
+              View portfolio timeline →
+            </Link>
+            {pollingData && (
+              <>
+                <span className="text-muted-foreground text-xs">·</span>
+                <PortfolioFreshnessIndicator
+                  sourceOfTruth={pollingData.sourceOfTruth}
+                  asOf={pollingData.asOf}
+                  freshnessMs={pollingData.freshnessMs}
+                  compact
+                />
+                {isRefreshing && (
+                  <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Updating…
+                  </span>
+                )}
+              </>
+            )}
+          </div>
         </div>
         <div className="flex gap-2">
           <Button
@@ -248,20 +341,43 @@ export default function PortfolioPage() {
         </div>
       </div>
 
+      {pollingData && pollingData.positionsFetchOk === false && (
+        <Card className="border-amber-500/50 bg-amber-500/5">
+          <CardContent className="py-3">
+            <p className="text-sm text-amber-700 dark:text-amber-400">
+              Positions could not be loaded. Retry or check connection.
+            </p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => fetchPositions()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {positionAlerts.length > 0 && (
         <Card className="border-amber-500/50 bg-amber-500/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-amber-700 dark:text-amber-400 text-base">
-              <AlertTriangle className="h-4 w-4" /> Live alerts affecting positions
+              <AlertTriangle className="h-4 w-4" /> Alerts
             </CardTitle>
-            <CardDescription>Drift or operational alerts for assets/markets in your portfolio. Resolve on Ops.</CardDescription>
+            <CardDescription>Sync (drift) and portfolio (engine) alerts. Resolve drift on Ops.</CardDescription>
           </CardHeader>
           <CardContent>
             <ul className="space-y-2 text-sm">
-              {positionAlerts.slice(0, 5).map((a) => (
+              {positionAlerts.slice(0, 8).map((a) => (
                 <li key={a.id} className="flex items-center justify-between gap-2">
-                  <span className="truncate flex-1" title={a.message}>{a.message}</span>
-                  <span className={cn("rounded px-1.5 py-0.5 text-xs shrink-0", a.severity === "critical" && "bg-red-500/20", a.severity === "warning" && "bg-amber-500/20")}>{a.severity}</span>
+                  <span className="truncate flex-1" title={a.message}>
+                    {a.title ? `${a.title}: ${a.message}` : a.message}
+                  </span>
+                  <span className={cn(
+                    "rounded px-1.5 py-0.5 text-xs shrink-0",
+                    a.source === "engine" && "bg-sky-500/20 text-sky-700 dark:text-sky-400",
+                    a.source === "drift" && "bg-amber-500/20 text-amber-700 dark:text-amber-400",
+                    a.severity === "critical" && "bg-red-500/20",
+                    a.severity === "warning" && !a.source && "bg-amber-500/20"
+                  )}>
+                    {a.source === "engine" ? "Portfolio" : a.source === "drift" ? "Sync" : a.severity}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -285,6 +401,15 @@ export default function PortfolioPage() {
               <div className="h-10 bg-muted/50 rounded animate-pulse" />
               <div className="h-10 bg-muted/50 rounded animate-pulse" />
               <p className="text-xs text-muted-foreground">Loading positions…</p>
+            </div>
+          ) : pollingData?.positionsFetchOk === false ? (
+            <div className="py-8 text-center">
+              <AlertTriangle className="mx-auto h-10 w-10 text-amber-500/80" />
+              <p className="mt-2 text-sm font-medium text-foreground">Could not load positions</p>
+              <p className="text-sm text-muted-foreground mt-1">The positions API returned an error.</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => fetchPositions()}>
+                Retry
+              </Button>
             </div>
           ) : positions.length === 0 ? (
             <div className="py-12 text-center">
@@ -445,21 +570,22 @@ function PositionDetailDrawer({
     if (!position?.token?.assetId) return;
     setThesisSaving(true);
     try {
-      const res = await fetch("/api/portfolio/position-thesis", {
+      const res = await fetch(`/api/portfolio/positions/${encodeURIComponent(position.token.assetId)}/thesis`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          assetId: position.token.assetId,
           entryThesis: entryThesis.trim() || null,
           currentThesisStatus,
           exitReason: exitReason.trim() || null,
           notes: notes.trim() || null,
-          marketId: position.syncedMarketId ?? null,
         }),
       });
       if (res.ok) {
         setThesisEditOpen(false);
         onThesisSaved?.();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        console.error("Thesis save failed:", data.error ?? res.statusText);
       }
     } finally {
       setThesisSaving(false);
@@ -518,15 +644,15 @@ function PositionDetailDrawer({
               <DetailRow label="First fill" value={formatRelativeDate(timing.firstFillAt)} muted />
               <DetailRow label="Last fill" value={formatRelativeDate(timing.lastFillAt)} muted />
               <DetailRow label="Fill count" value="—" muted />
-              <DetailRow label="Time to resolution" value={quality.isResolved ? "Resolved" : formatTimeToResolution(timing.hoursToResolution)} muted />
+              <DetailRow label="Time to resolution" value={quality.marketEndDatePassed ? "Resolved" : formatTimeToResolution(timing.hoursToResolution)} muted />
               <DetailRow label="Last synced" value={timing.lastSyncedAt ? formatRelativeDate(timing.lastSyncedAt) : "—"} muted />
             </div>
           </div>
           <div>
             <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Data quality</h4>
             <div className="space-y-0">
-              <DetailRow label="Resolution" value={quality.hasFullMarketMetadata ? (position.resolutionSource ?? quality.matchedBy ?? "—") : "Unresolved"} muted={!quality.hasFullMarketMetadata} />
-              {!quality.hasFullMarketMetadata && (
+              <DetailRow label="Resolution" value={quality.hasCompleteDisplayMetadata ? (position.resolutionSource ?? quality.matchedBy ?? "—") : "Unresolved"} muted={!quality.hasCompleteDisplayMetadata} />
+              {!quality.hasCompleteDisplayMetadata && (
                 <p className="text-xs text-muted-foreground pt-1.5">Market not yet resolved in catalog.</p>
               )}
               {quality.warnings.length > 0 && (
@@ -718,12 +844,12 @@ function PositionRow({
             </span>
           )}
         </div>
-        {quality.warnings.length > 0 && !quality.hasFullMarketMetadata && (
+        {quality.warnings.length > 0 && !quality.hasCompleteDisplayMetadata && (
           <p className="text-[10px] text-muted-foreground mt-1 max-w-[160px]" title={quality.warnings.join(". ")}>
             Catalog link unavailable until market is resolved.
           </p>
         )}
-        {quality.warnings.length > 0 && quality.hasFullMarketMetadata && quality.warnings[0] && (
+        {quality.warnings.length > 0 && quality.hasCompleteDisplayMetadata && quality.warnings[0] && (
           <p className="text-[10px] text-muted-foreground mt-1 max-w-[160px]" title={quality.warnings.join(". ")}>
             {quality.warnings[0]}
           </p>
@@ -745,7 +871,7 @@ function PositionRow({
         {formatUsd(economics.unrealizedPnl)}
       </td>
       <td className="py-2.5 px-2 text-right tabular-nums align-top text-muted-foreground">
-        {quality.isResolved ? "Resolved" : formatTimeToResolution(timing.hoursToResolution)}
+        {quality.marketEndDatePassed ? "Resolved" : formatTimeToResolution(timing.hoursToResolution)}
       </td>
       <td className="py-2.5 px-2 text-muted-foreground align-top text-xs">
         {timing.firstFillAt ? formatRelativeDate(timing.firstFillAt) : "—"}
@@ -844,7 +970,8 @@ function ExitReviewModal({
   let reasoning: string[] = [];
   if (position.decision?.reasoningJson) {
     try {
-      reasoning = JSON.parse(position.decision.reasoningJson) as string[];
+      const parsed = JSON.parse(position.decision.reasoningJson) as string[] | { explanation?: string[] };
+      reasoning = Array.isArray(parsed) ? parsed : (parsed.explanation ?? []);
     } catch { /* ignore */ }
   }
 

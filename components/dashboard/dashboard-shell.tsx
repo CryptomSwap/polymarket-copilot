@@ -13,6 +13,7 @@ const PATH_TITLES: Record<string, string> = {
   "/bot": "Bot Command Center",
   "/orders": "Orders",
   "/ops": "Ops",
+  "/paper-trading": "Paper trading",
   "/analytics": "Analytics",
   "/ml": "ML baseline",
   "/settings/polymarket": "Polymarket settings",

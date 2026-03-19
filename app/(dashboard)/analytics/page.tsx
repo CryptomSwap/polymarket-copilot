@@ -19,7 +19,8 @@ interface Snapshot {
   unrealizedPnl: string;
   openPositionsCount: number;
   openOrdersCount: number;
-  topConcentrationPct: string;
+  topThemeConcentrationPct: string;
+  topMarketConcentrationPct?: string | null;
   yesExposure: string;
   noExposure: string;
   createdAt: string;

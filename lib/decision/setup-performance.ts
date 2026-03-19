@@ -1,7 +1,7 @@
 /**
  * Setup performance profiling from execution analytics.
  * Aggregates by signalType, category, theme, reviewStatus.
- * Persists SetupPerformanceProfile for use by the blended decision engine.
+ * Persists SetupPerformanceProfile for use by the staged decision engine.
  */
 
 import { prisma } from "@/lib/db";

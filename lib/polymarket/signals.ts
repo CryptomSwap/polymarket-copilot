@@ -127,9 +127,21 @@ function portfolioPenalty(metrics: MarketMetrics): number {
   return 0;
 }
 
+/**
+ * Automation behavior penalty: only BehaviorFlag rows with sourceScope automation or runtime.
+ * Manual discretionary activity (manual) and portfolio-state mirrors (portfolio) do not count.
+ * Legacy rows with null sourceScope are excluded until backfilled (see tools/backfill-behavior-flag-sources.ts).
+ */
 async function behaviorPenalty(funderAddress: string): Promise<number> {
+  const now = new Date();
+  const lookbackDays = 30;
+  const cutoff = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   const recent = await prisma.behaviorFlag.findMany({
-    where: { funderAddress },
+    where: {
+      funderAddress,
+      createdAt: { gte: cutoff },
+      sourceScope: { in: ["automation", "runtime"] },
+    },
     orderBy: { createdAt: "desc" },
     take: 10,
   });
@@ -138,6 +150,11 @@ async function behaviorPenalty(funderAddress: string): Promise<number> {
   if (high >= 2) return 0.3;
   if (high >= 1 || medium >= 2) return 0.15;
   return 0;
+}
+
+/** Same value `generateSignals` writes to `MarketSignal.behaviorPenalty` (per funder). For ops tooling. */
+export async function getAutomationBehaviorPenaltyForFunder(funderAddress: string): Promise<number> {
+  return behaviorPenalty(funderAddress.trim().toLowerCase());
 }
 
 function thesisAndInvalidation(

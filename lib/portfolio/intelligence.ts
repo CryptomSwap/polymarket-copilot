@@ -1,15 +1,33 @@
 /**
  * Portfolio Intelligence v1: aggregates canonical positions into a dashboard-ready payload.
- * Uses canonical position layer and shared per-position insight helper. Deterministic, threshold-based.
+ * Uses the same open truth model as overview/positions: official positions define open set, filter closed, derived fallback.
  */
 
 import { prisma } from "@/lib/db";
+import { getLiveOfficialPositions } from "@/lib/portfolio/live-portfolio-service";
+import { getLiveOfficialOpenOrders, getOrderSourceOfTruth } from "@/lib/portfolio/live-open-orders-service";
+import { buildOpenPositionsFromOfficial } from "@/lib/portfolio/open-positions-from-official";
 import {
   buildCanonicalPositionView,
   type CanonicalPositionView,
+  type PositionEnrichmentInput,
 } from "@/lib/portfolio/canonical-position-view";
 import { computeCanonicalPositionInsight } from "@/lib/portfolio/canonical-position-insight";
 import { enrichPositionsBatch } from "@/lib/portfolio/enrich-positions";
+import { getResolutionCounts } from "@/lib/portfolio/resolution-classifier";
+import {
+  normalizeFreshnessForApi,
+  unknownFreshness,
+  type FreshnessState,
+} from "@/lib/portfolio/freshness-contract";
+import type { MergedOpenRow } from "@/lib/portfolio/open-positions-from-official";
+import {
+  buildPortfolioRiskInputFromViews,
+  calculatePortfolioRisk,
+  setPortfolioRiskSnapshot,
+  type PortfolioRiskSnapshot,
+  type PortfolioRiskWorkingOrderInput,
+} from "@/lib/portfolio-risk";
 
 // --- Helpers ---
 
@@ -59,7 +77,12 @@ export interface PortfolioIntelligenceSummary {
   nearResolutionPositions: number;
   totalOpenExposure: number | null;
   totalUnrealizedPnl: number | null;
-  topConcentrationPct: number | null;
+  /** Sum of costBasis only for rows with available basis; used for PnL % flags. */
+  totalCostBasis: number | null;
+  /** Largest theme % of portfolio (by exposure). */
+  topThemeConcentrationPct: number | null;
+  /** Largest single market % of portfolio (by exposure). */
+  topMarketConcentrationPct: number | null;
   yesExposure: number | null;
   noExposure: number | null;
 }
@@ -125,6 +148,28 @@ export interface PortfolioIntelligenceDiagnostics {
   matchedByAssetId: number;
   categoriesCount: number;
   themesCount: number;
+  /** "official" when open set from official feed; "derived" when fallback. */
+  openPortfolioSource?: "official" | "derived";
+  /** Response-level source of truth for live-truth architecture. */
+  sourceOfTruth?: "official" | "derived" | "mixed_fallback";
+  asOf?: string;
+  freshnessMs?: number | null;
+  freshnessState?: FreshnessState;
+  officialFetchFailed?: boolean;
+  totalRowsBeforeFiltering?: number;
+  totalRowsAfterFiltering?: number;
+  closedOfficialExcluded?: number;
+  rowsWithOfficialBasis?: number;
+  rowsWithDerivedBasis?: number;
+  rowsWithUnavailableBasis?: number;
+  /** Open orders: "official" when from CLOB; "derived" when fallback. */
+  orderSourceOfTruth?: "official" | "derived";
+  ordersAsOf?: string;
+  ordersFreshnessMs?: number | null;
+  ordersFreshnessState?: FreshnessState;
+  officialOrdersFetchFailed?: boolean;
+  officialOrdersFetchStatus?: number;
+  officialOrdersFetchError?: string;
 }
 
 export interface PortfolioIntelligence {
@@ -133,6 +178,8 @@ export interface PortfolioIntelligence {
   flags: IntelligenceFlag[];
   actions: IntelligenceAction[];
   diagnostics: PortfolioIntelligenceDiagnostics;
+  /** Deterministic portfolio risk snapshot (concentration, exposure, warnings). */
+  portfolioRiskSnapshot?: PortfolioRiskSnapshot | null;
 }
 
 // --- Flag scoring ---
@@ -147,31 +194,175 @@ function flagScore(severity: FlagSeverity, ordinal: number): number {
   return FLAG_SEVERITY_WEIGHT[severity] + (10 - Math.min(ordinal, 10));
 }
 
-// --- Build canonical positions for funder ---
+// --- Build canonical positions from same open truth model as overview/positions ---
 
-async function loadCanonicalPositions(funderAddress: string): Promise<{
+function mergedRowToPositionInput(row: MergedOpenRow): Parameters<typeof buildCanonicalPositionView>[0] {
+  return {
+    funderAddress: row.funderAddress,
+    marketId: row.enrichMarketId,
+    assetId: row.assetId,
+    marketTitle: row.marketTitle ?? "",
+    outcome: row.outcome,
+    side: row.side,
+    size: row.size,
+    avgEntry: row.avgEntry,
+    lastPrice: row.lastPrice,
+    costBasis: row.costBasis,
+    marketValue: row.marketValue,
+    unrealizedPnl: row.unrealizedPnl,
+    realizedPnl: row.realizedPnl,
+    reservedOrderSize: row.reservedOrderSize,
+    reservedOrderValue: row.reservedOrderValue,
+    category: row.category,
+    theme: row.theme,
+    openedAt: row.openedAt,
+  };
+}
+
+async function loadOpenCanonicalPositions(funderAddress: string): Promise<{
   views: CanonicalPositionView[];
   matchedByMarketId: number;
   matchedByConditionId: number;
   matchedByAssetId: number;
-  unresolved: number;
+  openPortfolioSource: "official" | "derived";
+  totalRowsBeforeFiltering: number;
+  totalRowsAfterFiltering: number;
+  closedOfficialExcluded: number;
+  rowsWithOfficialBasis: number;
+  rowsWithDerivedBasis: number;
+  rowsWithUnavailableBasis: number;
+  sourceOfTruth: "official" | "derived" | "mixed_fallback";
+  asOf: Date;
+  freshnessMs: number | null;
+  freshnessState: FreshnessState;
+  officialFetchFailed: boolean;
 }> {
-  const positions = await prisma.derivedPosition.findMany({
-    where: { funderAddress: funderAddress.toLowerCase().trim() },
-  });
+  const funder = funderAddress.toLowerCase().trim();
+  const [liveOfficial, positions] = await Promise.all([
+    getLiveOfficialPositions(funder),
+    prisma.derivedPosition.findMany({
+      where: { funderAddress: funder },
+      include: { syncedMarket: { select: { status: true } } },
+    }),
+  ]);
+  const officialResult = liveOfficial.result;
+  const fetchMetadata = liveOfficial.metadata;
+  const useOfficialAsOpenSet = fetchMetadata.success;
+  const officialFetchFailed = !fetchMetadata.success;
+  const sourceOfTruth = useOfficialAsOpenSet ? "official" : "derived";
+  const asOf = fetchMetadata.asOf;
+  const posFresh = normalizeFreshnessForApi(fetchMetadata.fromCache, fetchMetadata.freshnessMs);
 
-  if (positions.length === 0) {
+  if (useOfficialAsOpenSet) {
+    const merged = buildOpenPositionsFromOfficial(
+      officialResult.positions,
+      positions,
+      funder,
+      true
+    );
+    const enrichInput = merged.rows.map((r) => ({
+      marketId: r.enrichMarketId,
+      assetId: r.assetId,
+      marketTitle: r.marketTitle,
+      category: r.category,
+      theme: r.theme,
+    }));
+    const { enriched } = await enrichPositionsBatch(enrichInput);
+
+    const now = Date.now();
+    const openOnlyRows: MergedOpenRow[] = [];
+    const openOnlyEnriched: PositionEnrichmentInput[] = [];
+    let closedOfficialExcluded = 0;
+
+    for (let i = 0; i < merged.rows.length; i++) {
+      const r = merged.rows[i];
+      const e = enriched[i];
+      const statusRaw = e.status ?? null;
+      const status = (String(statusRaw ?? "").toLowerCase());
+      const endIso =
+        e.endDate == null
+          ? null
+          : typeof e.endDate === "string"
+            ? e.endDate
+            : new Date(e.endDate).toISOString();
+      const end = endIso ? new Date(endIso).getTime() : null;
+      const isStatusClosed = status === "closed";
+      const isEndPast = end != null && Number.isFinite(end) && end <= now;
+      if (isStatusClosed || isEndPast) {
+        closedOfficialExcluded++;
+        continue;
+      }
+      openOnlyRows.push(r);
+      openOnlyEnriched.push(e);
+    }
+
+    const views = openOnlyRows.map((row, i) =>
+      buildCanonicalPositionView(
+        mergedRowToPositionInput(row),
+        openOnlyEnriched[i],
+        { firstFillAt: row.openedAt }
+      )
+    );
+
+    const matchedByMarketId = openOnlyEnriched.filter((e) => e.matchedBy === "marketId").length;
+    const matchedByConditionId = openOnlyEnriched.filter((e) => e.matchedBy === "conditionId").length;
+    const matchedByAssetId = openOnlyEnriched.filter((e) => e.matchedBy === "assetId").length;
+    const rowsWithOfficialBasis = openOnlyRows.filter(
+      (r) => r.basisSource === "official" || r.basisSource === "official_only"
+    ).length;
+    const rowsWithDerivedBasis = openOnlyRows.filter((r) => r.basisSource === "derived").length;
+    const rowsWithUnavailableBasis = openOnlyRows.filter(
+      (r) => r.basisSource === "unavailable"
+    ).length;
+
+    return {
+      views,
+      matchedByMarketId,
+      matchedByConditionId,
+      matchedByAssetId,
+      openPortfolioSource: "official",
+      totalRowsBeforeFiltering: merged.rows.length,
+      totalRowsAfterFiltering: openOnlyRows.length,
+      closedOfficialExcluded,
+      rowsWithOfficialBasis,
+      rowsWithDerivedBasis,
+      rowsWithUnavailableBasis,
+      sourceOfTruth: "official",
+      asOf: fetchMetadata.asOf,
+      freshnessMs: posFresh.freshnessMs,
+      freshnessState: posFresh.freshnessState,
+      officialFetchFailed: false,
+    };
+  }
+
+  // Fallback: derived-only, filter out closed by syncedMarket.status
+  const openPositions = positions.filter(
+    (p) => (p.syncedMarket?.status ?? "").toLowerCase() !== "closed"
+  );
+  if (openPositions.length === 0) {
+    const unknown = unknownFreshness();
     return {
       views: [],
       matchedByMarketId: 0,
       matchedByConditionId: 0,
       matchedByAssetId: 0,
-      unresolved: 0,
+      openPortfolioSource: "derived",
+      totalRowsBeforeFiltering: positions.length,
+      totalRowsAfterFiltering: 0,
+      closedOfficialExcluded: 0,
+      rowsWithOfficialBasis: 0,
+      rowsWithDerivedBasis: 0,
+      rowsWithUnavailableBasis: 0,
+      sourceOfTruth: "derived",
+      asOf: new Date(),
+      freshnessMs: unknown.freshnessMs,
+      freshnessState: unknown.freshnessState,
+      officialFetchFailed,
     };
   }
 
   const { enriched, diagnostics } = await enrichPositionsBatch(
-    positions.map((p) => ({
+    openPositions.map((p) => ({
       marketId: p.marketId,
       assetId: p.assetId,
       marketTitle: p.marketTitle,
@@ -180,7 +371,7 @@ async function loadCanonicalPositions(funderAddress: string): Promise<{
     }))
   );
 
-  const views = positions.map((p, i) =>
+  const views = openPositions.map((p, i) =>
     buildCanonicalPositionView(
       {
         funderAddress: p.funderAddress,
@@ -207,12 +398,24 @@ async function loadCanonicalPositions(funderAddress: string): Promise<{
     )
   );
 
+  const unknown = unknownFreshness();
   return {
     views,
     matchedByMarketId: diagnostics.matchedByMarketId,
     matchedByConditionId: diagnostics.matchedByConditionId,
     matchedByAssetId: diagnostics.matchedByAssetId,
-    unresolved: diagnostics.unresolved,
+    openPortfolioSource: "derived",
+    totalRowsBeforeFiltering: positions.length,
+    totalRowsAfterFiltering: openPositions.length,
+    closedOfficialExcluded: 0,
+    rowsWithOfficialBasis: 0,
+    rowsWithDerivedBasis: 0,
+    rowsWithUnavailableBasis: 0,
+    sourceOfTruth: "derived",
+    asOf: new Date(),
+    freshnessMs: unknown.freshnessMs,
+    freshnessState: unknown.freshnessState,
+    officialFetchFailed,
   };
 }
 
@@ -227,23 +430,23 @@ function computeFlags(
   const totalExposure = summary.totalOpenExposure ?? 0;
 
   if (totalExposure > 0) {
-    const topPct = summary.topConcentrationPct ?? 0;
-    if (topPct >= HIGH_CONCENTRATION_PCT) {
+    const topThemePct = summary.topThemeConcentrationPct ?? 0;
+    if (topThemePct >= HIGH_CONCENTRATION_PCT) {
       const severity: FlagSeverity =
-        topPct >= 60 ? "high" : topPct >= 45 ? "medium" : "low";
+        topThemePct >= 60 ? "high" : topThemePct >= 45 ? "medium" : "low";
       flags.push({
         code: "HIGH_CONCENTRATION",
         severity,
         score: flagScore(severity, 0),
-        message: `Top concentration is ${topPct.toFixed(1)}% of portfolio.`,
-        metadata: { topConcentrationPct: topPct },
+        message: `Top theme concentration is ${topThemePct.toFixed(1)}% of portfolio.`,
+        metadata: { topThemeConcentrationPct: topThemePct },
       });
     }
 
     const totalPnl = summary.totalUnrealizedPnl ?? 0;
-    const costBasis = totalExposure - totalPnl;
-    if (costBasis > 0) {
-      const pnlPct = (totalPnl / costBasis) * 100;
+    const totalCostBasis = summary.totalCostBasis ?? 0;
+    if (totalCostBasis > 0) {
+      const pnlPct = (totalPnl / totalCostBasis) * 100;
       if (pnlPct <= -LARGE_LOSS_PCT) {
         const sev: FlagSeverity = pnlPct <= -40 ? "high" : "medium";
         flags.push({
@@ -337,19 +540,39 @@ function deriveActions(flags: IntelligenceFlag[]): IntelligenceAction[] {
 
 /**
  * Get portfolio intelligence v1 for a funder.
- * Loads positions via canonical path, computes per-position insight, aggregates summary/buckets/flags/actions.
+ * Uses the same filtered open set as overview/positions: official feed when available, filter closed, derived fallback.
+ * Open-order diagnostics come from live official open orders when available.
  */
 export async function getPortfolioIntelligence(params: {
   funderAddress: string;
 }): Promise<PortfolioIntelligence> {
   const funder = params.funderAddress?.trim()?.toLowerCase() ?? "";
+  const [loadResult, liveOrdersResult] = await Promise.all([
+    loadOpenCanonicalPositions(funder),
+    getLiveOfficialOpenOrders(funder),
+  ]);
+  const orderSourceOfTruth = getOrderSourceOfTruth(liveOrdersResult.metadata);
   const {
     views,
     matchedByMarketId,
     matchedByConditionId,
     matchedByAssetId,
-    unresolved,
-  } = await loadCanonicalPositions(funder);
+    openPortfolioSource,
+    totalRowsBeforeFiltering,
+    totalRowsAfterFiltering,
+    closedOfficialExcluded,
+    rowsWithOfficialBasis,
+    rowsWithDerivedBasis,
+    rowsWithUnavailableBasis,
+    sourceOfTruth,
+    asOf,
+    freshnessMs,
+    freshnessState,
+    officialFetchFailed,
+  } = loadResult;
+  const orderFresh = liveOrdersResult.metadata.success
+    ? normalizeFreshnessForApi(liveOrdersResult.metadata.fromCache, liveOrdersResult.metadata.freshnessMs)
+    : unknownFreshness();
 
   const insightOptions = {
     nearResolutionHours: NEAR_RESOLUTION_HOURS,
@@ -361,18 +584,29 @@ export async function getPortfolioIntelligence(params: {
     insight: computeCanonicalPositionInsight(v.timing, v.quality, insightOptions),
   }));
 
-  const resolvedCount = matchedByMarketId + matchedByConditionId + matchedByAssetId;
+  const { unresolvedCount: canonicalUnresolved, resolvedCount: canonicalResolved } = getResolutionCounts(
+    views.map((v) => v.quality)
+  );
+  const resolvedCount = canonicalResolved;
+  const unresolvedCount = canonicalUnresolved;
   const staleCount = withInsight.filter((x) => x.insight.staleSync).length;
   const nearResolutionCount = withInsight.filter((x) => x.insight.nearResolution).length;
-  const unresolvedCount = withInsight.filter((x) => x.insight.unresolvedCatalog).length;
 
   const getCurrentValue = (v: CanonicalPositionView) =>
     safeNum(v.economics.currentValue ?? v.economics.exposure);
   const totalOpenExposure = views.reduce((s, v) => s + getCurrentValue(v), 0);
   const totalUnrealizedPnl = views.reduce(
-    (s, v) => s + safeNum(v.economics.unrealizedPnl),
+    (s, v) => s + (v.economics.unrealizedPnl != null ? safeNum(v.economics.unrealizedPnl) : 0),
     0
   );
+  const totalCostBasis = views.reduce((s, v) => {
+    const cb = v.economics.costBasis;
+    if (cb != null && cb !== "") {
+      const n = safeNum(cb);
+      if (Number.isFinite(n)) return s + n;
+    }
+    return s;
+  }, 0);
   const yesExposure = views
     .filter((v) => v.token.side.toUpperCase() === "YES")
     .reduce((s, v) => s + getCurrentValue(v), 0);
@@ -380,24 +614,29 @@ export async function getPortfolioIntelligence(params: {
     .filter((v) => v.token.side.toUpperCase() === "NO")
     .reduce((s, v) => s + getCurrentValue(v), 0);
 
-  const byMarket = aggregateExposure(
+  const byMarketRaw = aggregateExposure(
     views,
     (v) => v.market.id ?? v.market.conditionId ?? "unknown",
     getCurrentValue
   );
-  const byCategory = aggregateExposure(
+  const byCategoryRaw = aggregateExposure(
     views,
     (v) => v.market.category ?? "other",
     getCurrentValue
   );
-  const byTheme = aggregateExposure(
+  const byThemeRaw = aggregateExposure(
     views,
     (v) => v.market.theme ?? "Other",
     getCurrentValue
   );
+  const byMarket = byMarketRaw.filter((b) => b.exposure > 0);
+  const byCategory = byCategoryRaw.filter((b) => b.exposure > 0);
+  const byTheme = byThemeRaw.filter((b) => b.exposure > 0);
 
-  const topConcentrationPct =
+  const topThemeConcentrationPct =
     byTheme.length > 0 ? byTheme[0].pct : totalOpenExposure > 0 ? 0 : null;
+  const topMarketConcentrationPct =
+    byMarket.length > 0 ? byMarket[0].pct : totalOpenExposure > 0 ? 0 : null;
 
   const summary: PortfolioIntelligenceSummary = {
     totalPositions: views.length,
@@ -407,7 +646,9 @@ export async function getPortfolioIntelligence(params: {
     nearResolutionPositions: nearResolutionCount,
     totalOpenExposure: views.length > 0 ? totalOpenExposure : null,
     totalUnrealizedPnl: views.length > 0 ? totalUnrealizedPnl : null,
-    topConcentrationPct: views.length > 0 ? topConcentrationPct : null,
+    totalCostBasis: views.length > 0 && totalCostBasis > 0 ? totalCostBasis : null,
+    topThemeConcentrationPct: views.length > 0 ? topThemeConcentrationPct : null,
+    topMarketConcentrationPct: views.length > 0 ? topMarketConcentrationPct : null,
     yesExposure: views.length > 0 ? yesExposure : null,
     noExposure: views.length > 0 ? noExposure : null,
   };
@@ -441,7 +682,7 @@ export async function getPortfolioIntelligence(params: {
   const diagnostics: PortfolioIntelligenceDiagnostics = {
     totalPositions: views.length,
     resolvedPositions: resolvedCount,
-    unresolvedPositions: unresolved,
+    unresolvedPositions: unresolvedCount,
     stalePositions: staleCount,
     nearResolutionPositions: nearResolutionCount,
     matchedByMarketId,
@@ -449,7 +690,44 @@ export async function getPortfolioIntelligence(params: {
     matchedByAssetId,
     categoriesCount: categoriesSet.size,
     themesCount: themesSet.size,
+    openPortfolioSource,
+    sourceOfTruth,
+    asOf: asOf.toISOString(),
+    freshnessMs,
+    freshnessState,
+    officialFetchFailed,
+    totalRowsBeforeFiltering,
+    totalRowsAfterFiltering,
+    closedOfficialExcluded,
+    rowsWithOfficialBasis,
+    rowsWithDerivedBasis,
+    rowsWithUnavailableBasis,
+    orderSourceOfTruth,
+    ordersAsOf: liveOrdersResult.metadata.asOf.toISOString(),
+    ordersFreshnessMs: orderFresh.freshnessMs,
+    ordersFreshnessState: orderFresh.freshnessState,
+    officialOrdersFetchFailed: !liveOrdersResult.metadata.success,
+    officialOrdersFetchStatus: liveOrdersResult.metadata.status,
+    officialOrdersFetchError: liveOrdersResult.metadata.error ?? undefined,
   };
+
+  const workingOrdersForRisk: PortfolioRiskWorkingOrderInput[] = (liveOrdersResult.orders ?? []).map(
+    (o) => ({
+      assetId: o.assetId,
+      marketId: o.marketId,
+      side: o.side,
+      size: safeNum(o.remainingSize ?? o.size),
+      price: safeNum(o.price),
+      theme: null,
+    })
+  );
+
+  const riskInput = buildPortfolioRiskInputFromViews(funder, views, workingOrdersForRisk, {
+    nearResolutionHoursThreshold: NEAR_RESOLUTION_HOURS,
+    correlationHeuristics: "theme",
+  });
+  const portfolioRiskSnapshot = calculatePortfolioRisk(riskInput);
+  setPortfolioRiskSnapshot(portfolioRiskSnapshot, funder);
 
   return {
     summary,
@@ -457,6 +735,7 @@ export async function getPortfolioIntelligence(params: {
     flags,
     actions,
     diagnostics,
+    portfolioRiskSnapshot,
   };
 }
 

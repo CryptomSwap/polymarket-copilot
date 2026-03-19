@@ -207,6 +207,36 @@ export interface MarketStateStore {
 export class InMemoryMarketStateStore implements MarketStateStore {
   private readonly byAssetId = new Map<string, AssetLiveState>();
   private readonly trackedIds = new Set<string>();
+  private mutationCount = 0;
+
+  private maybePrune(): void {
+    this.mutationCount++;
+    if (this.mutationCount % 200 !== 0) return;
+    const maxAssets = Number(process.env.RUNTIME_MARKET_STATE_MAX_ASSETS ?? "5000") || 5000;
+    const inactiveEvictMs =
+      Number(process.env.RUNTIME_MARKET_STATE_INACTIVE_EVICT_MS ?? String(6 * 60 * 60 * 1000)) ||
+      6 * 60 * 60 * 1000;
+    const now = Date.now();
+    const candidates: Array<{ assetId: string; lastAt: number }> = [];
+    for (const [assetId, state] of this.byAssetId.entries()) {
+      const lastAt = state.health.lastMarketEventAt?.getTime() ?? state.quote.updatedAt?.getTime() ?? 0;
+      if (!this.trackedIds.has(assetId)) {
+        if (lastAt > 0 && now - lastAt >= inactiveEvictMs) {
+          this.byAssetId.delete(assetId);
+          continue;
+        }
+        candidates.push({ assetId, lastAt });
+      }
+    }
+    if (this.byAssetId.size <= maxAssets) return;
+    candidates.sort((a, b) => a.lastAt - b.lastAt);
+    let toEvict = this.byAssetId.size - maxAssets;
+    for (const c of candidates) {
+      if (toEvict <= 0) break;
+      this.byAssetId.delete(c.assetId);
+      toEvict--;
+    }
+  }
 
   getAsset(assetId: string): AssetLiveState | null {
     const s = this.byAssetId.get(assetId);
@@ -250,12 +280,14 @@ export class InMemoryMarketStateStore implements MarketStateStore {
       next = applyPatch(createEmptyAssetState(id), state as AssetLiveStatePatch);
     }
     this.byAssetId.set(id, next);
+    this.maybePrune();
   }
 
   patchAsset(assetId: string, patch: AssetLiveStatePatch): void {
     const existing = this.byAssetId.get(assetId);
     const next = existing ? applyPatch(existing, patch) : applyPatch(createEmptyAssetState(assetId), patch);
     this.byAssetId.set(assetId, next);
+    this.maybePrune();
   }
 
   hasAsset(assetId: string): boolean {

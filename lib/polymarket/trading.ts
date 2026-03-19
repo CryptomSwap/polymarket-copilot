@@ -2,6 +2,9 @@
  * Manual order placement and cancel via Polymarket CLOB.
  * Requires POLYMARKET_SIGNER_PRIVATE_KEY (funder/proxy wallet) for server-side placement.
  * All callers must pass executionSurface; platform policy gates real CLOB execution.
+ *
+ * Order lifecycle is persisted through the execution-ledger service (OrderIntent, ExecutedOrder, events)
+ * so the API path shares the same durable audit trail as the runtime path.
  */
 
 import { Wallet } from "ethers";
@@ -11,9 +14,20 @@ import { ClobClient, OrderType, Side } from "@polymarket/clob-client";
 import { prisma } from "@/lib/db";
 import { getStoredCredentials } from "./auth";
 import { createAuthenticatedClobClient } from "./client";
+import {
+  createIntentWithEvent,
+  appendOrderIntentEventToLedger,
+  markOrderIntentStatusInLedger,
+  createExecutedOrderForIntent,
+  appendExecutedOrderEventForOrder,
+  getIntentTimeline,
+  getExecutedOrder,
+} from "@/lib/execution-ledger/service";
+import { buildApiOrderIdempotencyKey } from "@/lib/execution-ledger/idempotency";
 
 const ORDER_INTENT_STATUS_PLACED = "placed";
 const ORDER_INTENT_STATUS_FAILED = "failed";
+const ORDER_INTENT_STATUS_PENDING = "pending";
 const EXECUTED_ORDER_STATUS_SUBMITTED = "submitted";
 
 /**
@@ -38,7 +52,7 @@ export function getSignerForTrading(): Wallet | null {
 export async function getClobClientForTrading(): Promise<ClobClient | null> {
   const signer = getSignerForTrading();
   if (!signer) return null;
-  const creds = await getStoredCredentials();
+  const { credential: creds } = await getStoredCredentials();
   if (!creds) return null;
   return createAuthenticatedClobClient(
     signer,
@@ -75,8 +89,25 @@ export interface PlaceOrderOptions {
 }
 
 /**
- * Create OrderIntent, place limit order on CLOB, persist ExecutedOrder.
- * Caller must pass executionSurface; assertExecutionAllowed is called before any CLOB call.
+ * If the intent was already placed (has ExecutedOrder), return the existing result.
+ */
+async function existingPlacedResult(intentId: string): Promise<PlaceOrderResult | null> {
+  const timeline = await getIntentTimeline(intentId, 50);
+  const executedOrderRow = timeline.find((r) => r.kind === "executed_order");
+  if (!executedOrderRow?.id) return null;
+  const exec = await getExecutedOrder(executedOrderRow.id);
+  if (!exec) return null;
+  return {
+    success: true,
+    orderIntentId: intentId,
+    polymarketOrderId: exec.polymarketOrderId,
+    executedOrderId: exec.id,
+  };
+}
+
+/**
+ * Create OrderIntent via execution-ledger (idempotent), place limit order on CLOB, persist ExecutedOrder and events.
+ * Duplicate requests with the same idempotency key return the existing intent/order without calling CLOB again.
  */
 export async function placeLimitOrder(
   input: PlaceOrderInput,
@@ -98,26 +129,58 @@ export async function placeLimitOrder(
     return { success: false, error: "Invalid price or size." };
   }
 
-  const side = input.side === "SELL" ? Side.SELL : Side.BUY;
   const orderType = OrderType.GTC;
-
-  const intent = await prisma.orderIntent.create({
-    data: {
-      funderAddress: input.funderAddress,
-      recommendationId: input.recommendationId ?? undefined,
-      marketId: input.marketId,
-      assetId: input.assetId,
-      outcome: input.outcome,
-      side: input.side,
-      orderType: orderType,
-      limitPrice: input.limitPrice,
-      size: input.size,
-      status: "pending",
-      riskPreviewJson: input.riskPreviewJson ?? undefined,
-    },
+  const funder = input.funderAddress.toLowerCase().trim();
+  const idempotencyKey = buildApiOrderIdempotencyKey({
+    funderAddress: funder,
+    assetId: input.assetId,
+    side: input.side,
+    orderType: String(orderType),
+    limitPrice: price,
+    requestedSize: size,
+    recommendationId: input.recommendationId ?? null,
   });
 
+  const intentInput = {
+    funderAddress: funder,
+    recommendationId: input.recommendationId ?? null,
+    source: "api",
+    marketId: input.marketId,
+    assetId: input.assetId,
+    outcome: input.outcome,
+    side: input.side,
+    orderType: String(orderType),
+    limitPrice: input.limitPrice,
+    requestedSize: input.size,
+    status: ORDER_INTENT_STATUS_PENDING,
+    idempotencyKey,
+    riskPreviewJson: input.riskPreviewJson ?? null,
+  };
+
+  const { intent, existing } = await createIntentWithEvent(intentInput, {
+    eventType: "CREATED",
+    payloadJson: JSON.stringify({ source: "api", at: new Date().toISOString() }),
+  });
+  await appendOrderIntentEventToLedger({
+    orderIntentId: intent.id,
+    eventType: "API_REQUESTED",
+    payloadJson: JSON.stringify({ at: new Date().toISOString() }),
+  });
+
+  if (existing) {
+    const alreadyPlaced = await existingPlacedResult(intent.id);
+    if (alreadyPlaced) return alreadyPlaced;
+    if (intent.status === ORDER_INTENT_STATUS_FAILED) {
+      return {
+        success: false,
+        orderIntentId: intent.id,
+        error: "Previous attempt to place this order failed.",
+      };
+    }
+  }
+
   try {
+    const side = input.side === "SELL" ? Side.SELL : Side.BUY;
     const response = await client.createAndPostOrder(
       {
         tokenID: input.assetId,
@@ -131,10 +194,12 @@ export async function placeLimitOrder(
 
     const orderId = response?.orderID ?? response?.order_id ?? response?.id ?? null;
     if (!orderId) {
-      await prisma.orderIntent.update({
-        where: { id: intent.id },
-        data: { status: ORDER_INTENT_STATUS_FAILED },
+      await appendOrderIntentEventToLedger({
+        orderIntentId: intent.id,
+        eventType: "FAILED",
+        payloadJson: JSON.stringify({ reason: "no_order_id_from_clob", at: new Date().toISOString() }),
       });
+      await markOrderIntentStatusInLedger(intent.id, ORDER_INTENT_STATUS_FAILED);
       return {
         success: false,
         orderIntentId: intent.id,
@@ -142,38 +207,52 @@ export async function placeLimitOrder(
       };
     }
 
-    await prisma.orderIntent.update({
-      where: { id: intent.id },
-      data: { status: ORDER_INTENT_STATUS_PLACED },
+    await markOrderIntentStatusInLedger(intent.id, ORDER_INTENT_STATUS_PLACED);
+    await appendOrderIntentEventToLedger({
+      orderIntentId: intent.id,
+      eventType: "READY_FOR_SUBMISSION",
+      payloadJson: JSON.stringify({ polymarketOrderId: String(orderId), at: new Date().toISOString() }),
     });
 
-    const executed = await prisma.executedOrder.create({
-      data: {
-        funderAddress: input.funderAddress,
-        orderIntentId: intent.id,
-        polymarketOrderId: String(orderId),
+    const { executedOrderId } = await createExecutedOrderForIntent(
+      {
+        funderAddress: funder,
         marketId: input.marketId,
         assetId: input.assetId,
         side: input.side,
+        orderType: String(orderType),
         price: input.limitPrice,
         size: input.size,
+        originalSize: input.size,
+        remainingSize: input.size,
         status: EXECUTED_ORDER_STATUS_SUBMITTED,
+        venue: "polymarket",
+        polymarketOrderId: String(orderId),
+        venueOrderId: String(orderId),
         rawJson: JSON.stringify(response ?? {}),
       },
+      { linkToIntentId: intent.id }
+    );
+    await appendExecutedOrderEventForOrder({
+      executedOrderId,
+      eventType: "SUBMITTED",
+      payloadJson: JSON.stringify({ polymarketOrderId: String(orderId), at: new Date().toISOString() }),
     });
 
     return {
       success: true,
       orderIntentId: intent.id,
       polymarketOrderId: String(orderId),
-      executedOrderId: executed.id,
+      executedOrderId,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await prisma.orderIntent.update({
-      where: { id: intent.id },
-      data: { status: ORDER_INTENT_STATUS_FAILED },
+    await appendOrderIntentEventToLedger({
+      orderIntentId: intent.id,
+      eventType: "FAILED",
+      payloadJson: JSON.stringify({ reason: message, at: new Date().toISOString() }),
     });
+    await markOrderIntentStatusInLedger(intent.id, ORDER_INTENT_STATUS_FAILED);
     return {
       success: false,
       orderIntentId: intent.id,

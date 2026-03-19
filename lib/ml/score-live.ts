@@ -42,11 +42,12 @@ function parseModelFromMetricsJson(metricsJson: string | null): LogisticRegressi
 }
 
 /**
- * Load the latest ACTIVE or APPROVED model run.
+ * Load the latest ACTIVE or APPROVED recommendation ML model run.
+ * Excludes shadow-trained models (modelType logistic_regression_shadow) so recommendation scoring stays recommendation-centric.
  */
 export async function getActiveOrApprovedModel(funderAddress?: string): Promise<{ run: { id: string; featureSetName: string }; model: LogisticRegressionModel } | null> {
   const run = await prisma.mlModelRun.findFirst({
-    where: { status: { in: ["ACTIVE", "APPROVED"] } },
+    where: { status: { in: ["ACTIVE", "APPROVED"] }, modelType: "logistic_regression" },
     orderBy: { updatedAt: "desc" },
   });
   if (!run?.metricsJson) return null;
@@ -60,10 +61,10 @@ export async function getActiveOrApprovedModel(funderAddress?: string): Promise<
  * Uses only pre-trade features; no evaluation or forward-return data.
  */
 function buildLiveFeatures(
-  rec: { id: string; priorityScore: string; marketSignal: { marketPrice: string; fairPrice: string; edge: string; confidence: string; momentumComponent: string | null; liquidityComponent: string | null; portfolioComponent: string | null; behaviorComponent: string | null; themeExposurePct?: string | null; topConcentrationPct?: string | null; theme: string | null; outcome: string }; review: { status: string } | null },
+  rec: { id: string; priorityScore: string; marketSignal: { marketPrice: string; fairPrice: string; edge: string; confidence: string; momentumComponent: string | null; liquidityComponent: string | null; portfolioComponent: string | null; behaviorComponent: string | null; themeExposurePct?: string | null; theme: string | null; outcome: string }; review: { status: string } | null },
   funder: string,
   themeExposurePct: number,
-  topConcentrationPct: number,
+  topThemeConcentrationPct: number,
   hasExistingPosition: boolean,
   linkedNewsCount: number,
   newsFreshness: number,
@@ -82,7 +83,7 @@ function buildLiveFeatures(
     portfolioComponent: rec.marketSignal.portfolioComponent,
     behaviorComponent: rec.marketSignal.behaviorComponent,
     themeExposurePct: String(themeExposurePct),
-    topConcentrationPct: String(topConcentrationPct),
+    topThemeConcentrationPct: String(topThemeConcentrationPct),
     hasExistingPosition,
     linkedNewsCount,
     newsFreshnessScore: String(newsFreshness),
@@ -128,7 +129,7 @@ export async function scoreLiveRecommendations(
     orderBy: { createdAt: "desc" },
   });
   const totalExposure = snapshot ? parseNum(snapshot.totalOpenExposure) : 0;
-  const topConcentrationPct = snapshot ? parseNum(snapshot.topConcentrationPct) : 0;
+  const topThemeConcentrationPct = snapshot ? parseNum(snapshot.topThemeConcentrationPct) : 0;
 
   const positions = await prisma.derivedPosition.findMany({ where: { funderAddress: funder } });
   const themeExposure = new Map<string, number>();
@@ -171,7 +172,7 @@ export async function scoreLiveRecommendations(
       rec as Parameters<typeof buildLiveFeatures>[0],
       funder,
       themeExposurePct,
-      topConcentrationPct,
+      topThemeConcentrationPct,
       hasExistingPosition,
       linkedNewsCount,
       newsFreshness,

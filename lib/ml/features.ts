@@ -39,7 +39,8 @@ export interface TrainingRow {
   longshotComponent: number;
   timeComponent: number;
   themeExposurePct: number;
-  topConcentrationPct: number;
+  /** Largest theme % of portfolio. */
+  topThemeConcentrationPct: number;
   hasExistingPosition: number;
   reservedExposure?: number;
   linkedNewsCount: number;
@@ -74,7 +75,7 @@ export function toFeatureVector(row: {
   portfolioComponent?: string | number | null;
   behaviorComponent?: string | number | null;
   themeExposurePct?: string | number | null;
-  topConcentrationPct?: string | number | null;
+  topThemeConcentrationPct?: string | number | null;
   hasExistingPosition?: boolean;
   linkedNewsCount?: number;
   newsFreshnessScore?: string | number | null;
@@ -97,7 +98,7 @@ export function toFeatureVector(row: {
     parseNum(row.portfolioComponent),
     parseNum(row.behaviorComponent),
     parseNum(row.themeExposurePct),
-    parseNum(row.topConcentrationPct),
+    parseNum(row.topThemeConcentrationPct),
     row.hasExistingPosition ? 1 : 0,
     Number(row.linkedNewsCount) || 0,
     parseNum(row.newsFreshnessScore),
@@ -114,7 +115,7 @@ export function toFeatureVector(row: {
 
 export const FEATURE_NAMES = [
   "marketPrice", "fairPrice", "edge", "confidence", "momentumComponent", "liquidityComponent",
-  "portfolioComponent", "behaviorComponent", "themeExposurePct", "topConcentrationPct",
+  "portfolioComponent", "behaviorComponent", "themeExposurePct", "topThemeConcentrationPct",
   "hasExistingPosition", "linkedNewsCount", "newsFreshnessScore", "newsCredibilityScore",
   "noveltyScore", "saturationScore", "catalystBoost", "signalTypeEnc", "actionEnc", "reviewStatusEnc",
   "priorityScore",
@@ -136,7 +137,8 @@ export function toTrainingRow(raw: {
   longshotComponent?: string | null;
   timeComponent?: string | null;
   themeExposurePct?: string | null;
-  topConcentrationPct?: string | null;
+  /** Theme concentration. */
+  topThemeConcentrationPct?: string | null;
   hasExistingPosition: boolean;
   reservedExposure?: string | null;
   linkedNewsCount: number;
@@ -171,7 +173,7 @@ export function toTrainingRow(raw: {
     longshotComponent: parseNum(raw.longshotComponent),
     timeComponent: parseNum(raw.timeComponent),
     themeExposurePct: parseNum(raw.themeExposurePct),
-    topConcentrationPct: parseNum(raw.topConcentrationPct),
+    topThemeConcentrationPct: parseNum(raw.topThemeConcentrationPct ?? 0),
     hasExistingPosition: raw.hasExistingPosition ? 1 : 0,
     reservedExposure: parseNum(raw.reservedExposure) || 0,
     linkedNewsCount: raw.linkedNewsCount,

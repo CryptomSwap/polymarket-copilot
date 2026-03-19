@@ -14,6 +14,7 @@ import {
   Cpu,
   Activity,
   Bot,
+  LineChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ const navItems = [
   { href: "/bot", label: "Bot", icon: Bot },
   { href: "/orders", label: "Orders", icon: ShoppingCart },
   { href: "/ops", label: "Ops", icon: Activity },
+  { href: "/paper-trading", label: "Paper trading", icon: LineChart },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/ml", label: "ML baseline", icon: Cpu },
   { href: "/settings/polymarket", label: "Polymarket", icon: Settings },

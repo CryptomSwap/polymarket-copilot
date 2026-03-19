@@ -32,13 +32,31 @@ export interface LiveStrategyPlaceholderConfig {
   minLiquidityForQuotes?: number;
   /** Default size for UPDATE_QUOTES when no position (default 1). */
   defaultQuoteSize?: number;
+  /**
+   * When true (e.g. paper mode), do not NOOP for market_degraded; only NOOP for market_stale.
+   * Allows UPDATE_QUOTES from assets that had an update >60s ago but <120s (degraded not stale).
+   */
+  allowDegradedForPaper?: boolean;
+  /**
+   * When true (e.g. paper mode), do not NOOP for market_not_tradable when we have a valid quote.
+   * Allows UPDATE_QUOTES from quote-only or zero-depth assets if spread/mid pass; uses a sentinel
+   * quality score when liquidity.qualityScore is null so intent generation can run in paper.
+   */
+  allowQuoteOnlyForPaper?: boolean;
 }
 
-const DEFAULT_CONFIG: Required<LiveStrategyPlaceholderConfig> = {
+const DEFAULT_CONFIG: Required<
+  Omit<LiveStrategyPlaceholderConfig, "allowDegradedForPaper" | "allowQuoteOnlyForPaper">
+> & {
+  allowDegradedForPaper: boolean;
+  allowQuoteOnlyForPaper: boolean;
+} = {
   inventoryThresholdFraction: 0.8,
   minSpreadBpsForQuotes: 5,
   minLiquidityForQuotes: 0.3,
   defaultQuoteSize: 1,
+  allowDegradedForPaper: false,
+  allowQuoteOnlyForPaper: false,
 };
 
 function getAssetState(ctx: BotDecisionContext): AssetLiveState | null {
@@ -74,7 +92,10 @@ export function evaluateLiveStrategyPlaceholder(
   context: BotDecisionContext,
   config?: LiveStrategyPlaceholderConfig
 ): BotDecisionOutput {
-  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const cfg = { ...DEFAULT_CONFIG, ...config } as typeof DEFAULT_CONFIG & {
+    allowDegradedForPaper: boolean;
+    allowQuoteOnlyForPaper: boolean;
+  };
   const assetId = context.assetId ?? "";
   const marketId = (context.assetLiveState != null && typeof context.assetLiveState === "object" && "market" in context.assetLiveState)
     ? (context.assetLiveState as AssetLiveState).market?.marketId ?? undefined
@@ -105,13 +126,13 @@ export function evaluateLiveStrategyPlaceholder(
       }
       return { action: "NOOP", assetId, marketId, reason: "market_stale" };
     }
-    if (health?.isDegraded) {
+    if (health?.isDegraded && !cfg.allowDegradedForPaper) {
       if (openOrders.length > 0) {
         return { action: "CANCEL_ORDERS", assetId, marketId, reason: "market_stale_cancel" };
       }
       return { action: "NOOP", assetId, marketId, reason: "market_degraded" };
     }
-    if (liquidity?.isTradable === false) {
+    if (liquidity?.isTradable === false && !cfg.allowQuoteOnlyForPaper) {
       return { action: "NOOP", assetId, marketId, reason: "market_not_tradable" };
     }
   } else {
@@ -134,8 +155,11 @@ export function evaluateLiveStrategyPlaceholder(
   // --- Favorable spread/liquidity → UPDATE_QUOTES (conservative quote at mid) ---
   const quote = asset!.quote;
   const spreadBps = quote?.spreadBps ?? null;
-  const qualityScore = asset!.liquidity?.qualityScore ?? null;
+  const rawQualityScore = asset!.liquidity?.qualityScore ?? null;
   const mid = quote?.mid ?? quote?.bestBid ?? quote?.bestAsk ?? null;
+  // When allowQuoteOnlyForPaper is true, treat missing quality (e.g. no depth) as 0.5 so paper can emit intents.
+  const qualityScore =
+    rawQualityScore ?? (cfg.allowQuoteOnlyForPaper ? 0.5 : null);
 
   if (
     spreadBps != null && spreadBps >= cfg.minSpreadBpsForQuotes &&

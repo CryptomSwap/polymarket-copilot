@@ -26,7 +26,7 @@ export async function GET() {
 
   const fills = await prisma.userFill.findMany({
     where: { funderAddress: funder },
-    orderBy: { syncedAt: "asc" },
+    orderBy: [{ matchTime: "asc" }, { tradeId: "asc" }],
   });
 
   const { rows } = await derivePositionsFromFills(funder);
@@ -59,10 +59,17 @@ export async function GET() {
       avgEntry: number;
     }
   >();
+  const seenFillSignature = new Set<string>();
 
   for (const f of fills) {
     const key = normalizeAssetId(f.assetId);
     if (!sampleAssetSet.has(key)) continue;
+    const matchTime = f.matchTime ? new Date(f.matchTime) : null;
+    const timeKey = matchTime ? String(Math.floor(matchTime.getTime() / 1000)) : "";
+    const fillSignature = `${key}|${timeKey}|${String(f.size).trim()}|${String(f.side).trim()}`;
+    if (seenFillSignature.has(fillSignature)) continue;
+    seenFillSignature.add(fillSignature);
+
     const mult = f.side === "BUY" ? 1 : -1;
     const rawNum = parseNum(f.size);
     const normalized = sizeToShares(rawNum, f.size);

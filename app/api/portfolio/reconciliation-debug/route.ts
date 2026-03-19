@@ -30,17 +30,24 @@ export async function GET() {
 
   const fills = await prisma.userFill.findMany({
     where: { funderAddress: funder },
-    orderBy: { syncedAt: "asc" },
+    orderBy: [{ matchTime: "asc" }, { tradeId: "asc" }],
   });
 
   const normalizeAssetId = (id: string) => String(id ?? "").trim();
+  const seenFillSignature = new Set<string>();
 
-  // CSV-style aggregation: BUY = +size, SELL = -size, by assetId
+  // CSV-style aggregation: BUY = +size, SELL = -size, by assetId. Dedupe by (assetId, matchTime, size, side) to match derivation.
   const byAsset = new Map<
     string,
     { netShares: number; costBasisNet: number; fillCount: number; marketId: string; outcome: string }
   >();
   for (const f of fills) {
+    const matchTime = f.matchTime ? new Date(f.matchTime) : null;
+    const timeKey = matchTime ? String(Math.floor(matchTime.getTime() / 1000)) : "";
+    const fillSignature = `${normalizeAssetId(f.assetId)}|${timeKey}|${String(f.size).trim()}|${String(f.side).trim()}`;
+    if (seenFillSignature.has(fillSignature)) continue;
+    seenFillSignature.add(fillSignature);
+
     const mult = f.side === "BUY" ? 1 : -1;
     const sizeShares = sizeToShares(parseNum(f.size), f.size) * mult;
     const price = parseNum(f.price);

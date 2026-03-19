@@ -19,7 +19,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: "Run not found" }, { status: 404 });
     }
     const currentActive = await prisma.mlModelRun.findMany({
-      where: { status: "ACTIVE" },
+      where: { status: "ACTIVE", modelType: run.modelType },
     });
     for (const r of currentActive) {
       if (r.id !== runId) {

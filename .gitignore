@@ -36,3 +36,19 @@ next-env.d.ts
 
 # prisma
 prisma/migrations
+
+# Local DB / ops dumps (generated; run via npm run dump:*)
+/dump/
+/audit-dumps/
+/audit_dumps/
+
+# Worker and local runtime logs / captures
+*.log
+worker-*.log
+worker-startup-*.txt
+worker-startup-capture.txt
+worker-stderr.txt
+worker-stdout.txt
+
+# Ad-hoc repo snapshots (regenerate if needed)
+repo-tree.txt

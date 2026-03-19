@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { syncUser } from "@/lib/polymarket/user-sync";
 import { recordSyncJobStart, recordSyncJobFinish } from "@/lib/polymarket/sync-job";
-import { recomputePortfolio } from "@/lib/polymarket/recompute";
+import { recomputePortfolio, getFunderForRecompute } from "@/lib/polymarket/recompute";
+import { backfillHeldMarkets } from "@/lib/polymarket/markets";
 
 /**
  * POST /api/polymarket/user/sync
  * Fetches open orders and all trades (fills, paginated) and builds position snapshots; upserts to DB.
- * Triggers portfolio recompute on success. Read-only; no trading.
+ * After sync: backfills SyncedMarket + SyncedAsset for condition IDs the user holds (so portfolio resolution works), then recomputes portfolio.
  * Body: { fullResync?: boolean } — if true, clears UserFill for funder before fetching (full history resync).
  */
 export async function POST(request: Request) {
@@ -37,11 +38,37 @@ export async function POST(request: Request) {
         credentialsAvailable: result.credentialsAvailable,
         ordersFetchMethod: result.ordersFetchMethod,
         ordersFetchSkippedReason: result.ordersFetchSkippedReason,
+        ordersFetchHelper: result.ordersFetchHelper,
+        ordersRequestPath: result.ordersRequestPath,
+        ordersStatus: result.ordersStatus,
+        fillsFetchHelper: result.fillsFetchHelper,
+        fillsEndpoint: result.fillsEndpoint,
+        fillsRequestPath: result.fillsRequestPath,
+        fillsStatus: result.fillsStatus,
+        fillsBodySnippet: result.fillsBodySnippet,
+        fillsPaginationAttempted: result.fillsPaginationAttempted,
+        fillsPagesFetched: result.fillsPagesFetched,
+        fillsClassification: result.fillsClassification,
+        fillsPaginationTerminatedNormally: result.fillsPaginationTerminatedNormally,
+        fillsLastNextCursorSeen: result.fillsLastNextCursorSeen,
         errors: result.errors,
       },
     });
     if (status === "success") {
       try {
+        const funder = await getFunderForRecompute();
+        if (funder) {
+          const backfill = await backfillHeldMarkets(funder);
+          if (backfill.stillMissing > 0 || backfill.errors.length > 0) {
+            console.warn("[POST /api/polymarket/user/sync] backfill held markets", {
+              distinctHeldConditionIds: backfill.distinctHeldConditionIds,
+              upsertedMarkets: backfill.upsertedMarkets,
+              upsertedAssets: backfill.upsertedAssets,
+              stillMissing: backfill.stillMissing,
+              errors: backfill.errors,
+            });
+          }
+        }
         await recomputePortfolio();
       } catch (recomputeErr) {
         console.warn("[POST /api/polymarket/user/sync] recompute after sync failed:", recomputeErr);
@@ -63,6 +90,18 @@ export async function POST(request: Request) {
       credentialsAvailable: result.credentialsAvailable,
       ordersFetchMethod: result.ordersFetchMethod,
       ordersFetchSkippedReason: result.ordersFetchSkippedReason,
+      ordersFetchHelper: result.ordersFetchHelper,
+      ordersRequestPath: result.ordersRequestPath,
+      ordersStatus: result.ordersStatus,
+      fillsFetchHelper: result.fillsFetchHelper,
+      fillsEndpoint: result.fillsEndpoint,
+      fillsRequestPath: result.fillsRequestPath,
+      fillsStatus: result.fillsStatus,
+      fillsBodySnippet: result.fillsBodySnippet,
+      fillsPaginationAttempted: result.fillsPaginationAttempted,
+      fillsClassification: result.fillsClassification,
+      fillsPaginationTerminatedNormally: result.fillsPaginationTerminatedNormally,
+      fillsLastNextCursorSeen: result.fillsLastNextCursorSeen,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

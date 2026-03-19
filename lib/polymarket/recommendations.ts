@@ -28,7 +28,8 @@ export interface RecommendationContext {
   hasPositionInAsset: boolean;
   positionMarketValue: number;
   themeExposurePct: number;
-  topConcentrationPct: number;
+  /** Largest theme % of portfolio. */
+  topThemeConcentrationPct: number;
   /** Optional: news catalyst boost (0–0.1) to add to confidence. */
   newsCatalystBoost?: number;
   /** Optional: news saturation penalty (0–0.2) to subtract from confidence or add to block. */
@@ -100,7 +101,7 @@ export function signalToRecommendation(
     hasPositionInAsset,
     positionMarketValue,
     themeExposurePct,
-    topConcentrationPct,
+    topThemeConcentrationPct,
     newsCatalystBoost = 0,
     newsSaturationPenalty = 0,
   } = context;
@@ -108,7 +109,7 @@ export function signalToRecommendation(
 
   const materialExistingExposure = hasPositionInAsset && positionMarketValue >= MATERIAL_EXPOSURE_THRESHOLD;
   const wouldWorsenConcentration =
-    themeExposurePct > 0 && topConcentrationPct + themeExposurePct * 0.5 > TOP_CONCENTRATION_CAP;
+    themeExposurePct > 0 && topThemeConcentrationPct + themeExposurePct * 0.5 > TOP_CONCENTRATION_CAP;
   const isLateChase = signal.signalType === "LATE_CHASE";
   const lateChaseBlock = isLateChase && confidence < LATE_CHASE_MIN_CONFIDENCE;
 

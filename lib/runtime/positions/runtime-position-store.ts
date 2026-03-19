@@ -164,6 +164,35 @@ function applyPatch(
  */
 export class InMemoryRuntimePositionStore implements RuntimePositionStore {
   private readonly byKey = new Map<string, RuntimePositionState>();
+  private mutationCount = 0;
+
+  private maybePrune(now: Date = new Date()): void {
+    this.mutationCount++;
+    if (this.mutationCount % 200 !== 0) return;
+    const maxPositions = Number(process.env.RUNTIME_POSITION_STORE_MAX_POSITIONS ?? "5000") || 5000;
+    const zeroTtlMs =
+      Number(process.env.RUNTIME_POSITION_ZERO_TTL_MS ?? String(6 * 60 * 60 * 1000)) ||
+      6 * 60 * 60 * 1000;
+    const cutoff = now.getTime() - zeroTtlMs;
+    const zero: Array<{ key: string; updatedAt: number }> = [];
+    for (const [key, p] of this.byKey.entries()) {
+      if (Math.abs(p.netShares) < 1e-12) {
+        if (p.updatedAt.getTime() <= cutoff) {
+          this.byKey.delete(key);
+          continue;
+        }
+        zero.push({ key, updatedAt: p.updatedAt.getTime() });
+      }
+    }
+    if (this.byKey.size <= maxPositions) return;
+    zero.sort((a, b) => a.updatedAt - b.updatedAt);
+    let excess = this.byKey.size - maxPositions;
+    for (const z of zero) {
+      if (excess <= 0) break;
+      this.byKey.delete(z.key);
+      excess--;
+    }
+  }
 
   private static key(funderAddress: string, assetId: string): string {
     return `${funderAddress.toLowerCase()}::${assetId}`;
@@ -187,6 +216,7 @@ export class InMemoryRuntimePositionStore implements RuntimePositionStore {
 
   upsertPosition(state: RuntimePositionState): void {
     this.byKey.set(InMemoryRuntimePositionStore.key(state.funderAddress, state.assetId), clonePosition(state));
+    this.maybePrune(state.updatedAt);
   }
 
   patch(funderAddress: string, assetId: string, patch: RuntimePositionStatePatch): void {
@@ -198,7 +228,12 @@ export class InMemoryRuntimePositionStore implements RuntimePositionStore {
         ? (patch.updatedAt != null ? new Date(patch.updatedAt.getTime()) : new Date())
         : new Date();
     const next = applyPatch(prev, { ...patch, updatedAt });
-    this.byKey.set(key, next);
+    if (Math.abs(next.netShares) < 1e-12 && next.confidence === "live") {
+      this.byKey.delete(key);
+    } else {
+      this.byKey.set(key, next);
+    }
+    this.maybePrune(updatedAt);
   }
 
   applyFill(params: ApplyFillParams): void {
@@ -270,7 +305,12 @@ export class InMemoryRuntimePositionStore implements RuntimePositionStore {
         exposureNotional: newNetShares * mark,
       };
     }
-    this.byKey.set(key, next);
+    if (Math.abs(next.netShares) < 1e-12 && next.confidence === "live") {
+      this.byKey.delete(key);
+    } else {
+      this.byKey.set(key, next);
+    }
+    this.maybePrune(now);
   }
 
   markReconciling(funderAddress: string, assetId: string): void {

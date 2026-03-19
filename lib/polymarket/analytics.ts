@@ -36,7 +36,8 @@ export function computeSnapshot(input: SnapshotInput): {
   unrealizedPnl: string;
   openPositionsCount: number;
   openOrdersCount: number;
-  topConcentrationPct: string;
+  topThemeConcentrationPct: string;
+  topMarketConcentrationPct: string;
   yesExposure: string;
   noExposure: string;
 } {
@@ -50,6 +51,7 @@ export function computeSnapshot(input: SnapshotInput): {
   let yesExposure = 0;
   let noExposure = 0;
   const byTheme = new Map<string, number>();
+  const byMarket = new Map<string, number>();
 
   for (const p of positions) {
     const currentValue = parseNum(p.marketValue);
@@ -63,15 +65,18 @@ export function computeSnapshot(input: SnapshotInput): {
     unrealizedPnl += parseNum(p.unrealizedPnl);
     realizedPnl += parseNum(p.realizedPnl);
     const theme = p.theme ?? "Other";
+    const marketId = p.marketId ?? p.assetId ?? "unknown";
     byTheme.set(theme, (byTheme.get(theme) ?? 0) + currentValue);
+    byMarket.set(marketId, (byMarket.get(marketId) ?? 0) + currentValue);
     if (p.outcome.toUpperCase() === "YES") yesExposure += currentValue;
     else if (p.outcome.toUpperCase() === "NO") noExposure += currentValue;
   }
 
-  let topPct = 0;
-  if (totalCurrentValue > 0 && byTheme.size > 0) {
-    const maxTheme = Math.max(...Array.from(byTheme.values()));
-    topPct = (maxTheme / totalCurrentValue) * 100;
+  let topThemePct = 0;
+  let topMarketPct = 0;
+  if (totalCurrentValue > 0) {
+    if (byTheme.size > 0) topThemePct = (Math.max(...Array.from(byTheme.values())) / totalCurrentValue) * 100;
+    if (byMarket.size > 0) topMarketPct = (Math.max(...Array.from(byMarket.values())) / totalCurrentValue) * 100;
   }
 
   return {
@@ -84,7 +89,8 @@ export function computeSnapshot(input: SnapshotInput): {
     unrealizedPnl: toStr(unrealizedPnl),
     openPositionsCount: positions.length,
     openOrdersCount,
-    topConcentrationPct: toStr(topPct),
+    topThemeConcentrationPct: toStr(topThemePct),
+    topMarketConcentrationPct: toStr(topMarketPct),
     yesExposure: toStr(yesExposure),
     noExposure: toStr(noExposure),
   };
@@ -106,7 +112,8 @@ export async function persistSnapshot(
       unrealizedPnl: data.unrealizedPnl,
       openPositionsCount: data.openPositionsCount,
       openOrdersCount: data.openOrdersCount,
-      topConcentrationPct: data.topConcentrationPct,
+      topThemeConcentrationPct: data.topThemeConcentrationPct,
+      topMarketConcentrationPct: data.topMarketConcentrationPct,
       yesExposure: data.yesExposure,
       noExposure: data.noExposure,
     },

@@ -43,6 +43,68 @@ export async function getPositionThesis(
   return row;
 }
 
+/** Stable GET response shape: thesis data plus position context. Used when thesis is missing (empty defaults). */
+export interface PositionThesisResponse {
+  assetId: string;
+  marketId: string | null;
+  marketTitle: string | null;
+  currentThesisStatus: string;
+  entryThesis: string | null;
+  exitReason: string | null;
+  notes: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * Get thesis for API: requires position to exist (ownership). Returns response shape with position
+ * context (marketId, marketTitle). When no thesis exists, returns stable empty/default shape.
+ */
+export async function getPositionThesisForApi(
+  funderAddress: string,
+  assetId: string
+): Promise<PositionThesisResponse | null> {
+  const funder = funderAddress.toLowerCase().trim();
+  const position = await prisma.derivedPosition.findUnique({
+    where: { funderAddress_assetId: { funderAddress: funder, assetId } },
+    include: { syncedMarket: { select: { title: true } } },
+  });
+  if (!position) return null;
+
+  const thesis = await prisma.positionThesis.findUnique({
+    where: { funderAddress_assetId: { funderAddress: funder, assetId } },
+  });
+
+  const marketTitle = position.marketTitle ?? position.syncedMarket?.title ?? null;
+  const marketId = position.syncedMarketId ?? position.marketId ?? null;
+
+  if (!thesis) {
+    return {
+      assetId,
+      marketId,
+      marketTitle,
+      currentThesisStatus: "unknown",
+      entryThesis: null,
+      exitReason: null,
+      notes: null,
+      createdAt: null,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    assetId: thesis.assetId,
+    marketId: thesis.marketId ?? marketId,
+    marketTitle,
+    currentThesisStatus: thesis.currentThesisStatus,
+    entryThesis: thesis.entryThesis,
+    exitReason: thesis.exitReason,
+    notes: thesis.notes,
+    createdAt: thesis.createdAt.toISOString(),
+    updatedAt: thesis.updatedAt.toISOString(),
+  };
+}
+
 /**
  * List all theses for a funder (e.g. for positions that have a thesis).
  */

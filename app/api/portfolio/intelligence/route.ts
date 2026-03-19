@@ -27,6 +27,17 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       funderAddress: funder,
+      sourceOfTruth: d.sourceOfTruth ?? undefined,
+      asOf: d.asOf ?? undefined,
+      freshnessMs: d.freshnessMs ?? undefined,
+      freshnessState: d.freshnessState ?? undefined,
+      orderSourceOfTruth: d.orderSourceOfTruth ?? undefined,
+      ordersAsOf: d.ordersAsOf ?? undefined,
+      ordersFreshnessMs: d.ordersFreshnessMs ?? undefined,
+      ordersFreshnessState: d.ordersFreshnessState ?? undefined,
+      officialOrdersFetchFailed: d.officialOrdersFetchFailed,
+      officialOrdersFetchStatus: d.officialOrdersFetchStatus,
+      officialOrdersFetchError: d.officialOrdersFetchError,
       intelligence,
     });
   } catch (err) {

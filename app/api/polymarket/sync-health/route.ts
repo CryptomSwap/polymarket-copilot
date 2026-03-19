@@ -31,6 +31,8 @@ export async function GET() {
             metadata: lastUserSync.metadata ?? undefined,
           }
         : null,
+      /** For runtime stream connection/heartbeat/data freshness/reconciled/safeToAutomate, use GET /api/live/stream-health or GET /api/ops/runtime/health. */
+      streamHealthUrl: "/api/live/stream-health",
     });
   } catch (error) {
     console.error("[GET /api/polymarket/sync-health]", error);

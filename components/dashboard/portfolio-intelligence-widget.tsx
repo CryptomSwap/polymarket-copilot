@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -12,6 +12,8 @@ import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, RefreshCw, TrendingUp, Clock } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import { useLivePortfolioPolling } from "@/hooks/use-live-portfolio-polling";
+import { PortfolioFreshnessIndicator } from "@/components/portfolio/portfolio-freshness-indicator";
 
 interface ConcentrationBucket {
   key: string;
@@ -45,6 +47,14 @@ interface PositionRef {
 interface PortfolioIntelligenceResponse {
   ok: boolean;
   funderAddress?: string;
+  sourceOfTruth?: string;
+  asOf?: string;
+  freshnessMs?: number | null;
+  freshnessState?: "fresh" | "cached" | "unknown";
+  orderSourceOfTruth?: string;
+  ordersAsOf?: string;
+  ordersFreshnessMs?: number | null;
+  ordersFreshnessState?: "fresh" | "cached" | "unknown";
   intelligence?: {
     summary: {
       totalPositions: number;
@@ -54,7 +64,8 @@ interface PortfolioIntelligenceResponse {
       nearResolutionPositions: number;
       totalOpenExposure: number | null;
       totalUnrealizedPnl: number | null;
-      topConcentrationPct: number | null;
+      topThemeConcentrationPct: number | null;
+      topMarketConcentrationPct: number | null;
       yesExposure: number | null;
       noExposure: number | null;
     };
@@ -90,39 +101,36 @@ function formatPct(val: number): string {
 }
 
 export function PortfolioIntelligenceWidget() {
-  const [data, setData] = useState<PortfolioIntelligenceResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchIntelligence = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/portfolio/intelligence");
-      const json: PortfolioIntelligenceResponse = await res.json();
-      if (!res.ok) {
-        setError(json.error ?? "Failed to load portfolio intelligence.");
-        setData(json);
-        return;
-      }
-      if (!json.ok || !json.intelligence) {
-        setError(json.error ?? "No intelligence data returned.");
-        setData(null);
-        return;
-      }
-      setData(json);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Network error";
-      setError(msg);
-      setData(null);
-    } finally {
-      setLoading(false);
+  const fetchIntelligenceFn = useCallback(async (): Promise<PortfolioIntelligenceResponse> => {
+    const res = await fetch("/api/portfolio/intelligence");
+    const json: PortfolioIntelligenceResponse = await res.json();
+    if (!res.ok) {
+      setError(json.error ?? "Failed to load portfolio intelligence.");
+      return json;
     }
+    if (!json.ok || !json.intelligence) {
+      setError(json.error ?? "No intelligence data returned.");
+      return json;
+    }
+    setError(null);
+    return json;
   }, []);
 
-  useEffect(() => {
-    fetchIntelligence();
-  }, [fetchIntelligence]);
+  const {
+    data,
+    loading,
+    error: hookError,
+    refresh: fetchIntelligence,
+    isRefreshing,
+  } = useLivePortfolioPolling<PortfolioIntelligenceResponse>(fetchIntelligenceFn, {
+    intervalMs: 10_000,
+    refetchOnFocus: true,
+    preventOverlap: true,
+  });
+
+  const displayError = hookError ?? error;
 
   if (loading) {
     return (
@@ -141,7 +149,7 @@ export function PortfolioIntelligenceWidget() {
     );
   }
 
-  if (error && !data?.intelligence) {
+  if (displayError && !data?.intelligence) {
     const isNoFunder = data?.error?.toLowerCase().includes("funder") ?? false;
     return (
       <Card>
@@ -157,7 +165,7 @@ export function PortfolioIntelligenceWidget() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground mb-3">{error}</p>
+          <p className="text-sm text-muted-foreground mb-3">{displayError}</p>
           {!isNoFunder && (
             <Button variant="outline" size="sm" onClick={fetchIntelligence}>
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
@@ -292,8 +300,11 @@ export function PortfolioIntelligenceWidget() {
             <>
               {/* Concise summary lines */}
               <div className="space-y-1 text-sm text-muted-foreground border-b border-border/50 pb-3">
-                {summary.topConcentrationPct != null && (
-                  <p>Top market concentration is {formatPct(summary.topConcentrationPct)}.</p>
+                {summary.topThemeConcentrationPct != null && (
+                  <p>Top theme concentration is {formatPct(summary.topThemeConcentrationPct)}.</p>
+                )}
+                {summary.topMarketConcentrationPct != null && (
+                  <p>Top market concentration is {formatPct(summary.topMarketConcentrationPct)}.</p>
                 )}
                 {(summary.nearResolutionPositions ?? 0) > 0 && (
                   <p>{summary.nearResolutionPositions} position{summary.nearResolutionPositions !== 1 ? "s" : ""} resolve within 72 hours.</p>
@@ -329,10 +340,18 @@ export function PortfolioIntelligenceWidget() {
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground uppercase tracking-wider">
-                    Top concentration
+                    Top theme concentration
                   </p>
                   <p className="font-semibold tabular-nums">
-                    {formatPct(summary.topConcentrationPct ?? 0)}
+                    {formatPct(summary.topThemeConcentrationPct ?? 0)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                    Top market concentration
+                  </p>
+                  <p className="font-semibold tabular-nums">
+                    {formatPct(summary.topMarketConcentrationPct ?? 0)}
                   </p>
                 </div>
                 <div>
@@ -425,11 +444,30 @@ export function PortfolioIntelligenceWidget() {
         </CardContent>
       </Card>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button variant="outline" size="sm" onClick={fetchIntelligence}>
           <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
           Refresh
         </Button>
+        {(data?.asOf != null || data?.ordersAsOf != null) && (
+          <PortfolioFreshnessIndicator
+            sourceOfTruth={data.sourceOfTruth}
+            asOf={data.asOf}
+            freshnessMs={data.freshnessMs}
+            freshnessState={data.freshnessState}
+            orderSourceOfTruth={data.orderSourceOfTruth}
+            ordersAsOf={data.ordersAsOf}
+            ordersFreshnessMs={data.ordersFreshnessMs}
+            ordersFreshnessState={data.ordersFreshnessState}
+            compact
+          />
+        )}
+        {isRefreshing && (
+          <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Updating…
+          </span>
+        )}
         <Link
           href="/portfolio"
           className="text-sm text-muted-foreground hover:text-foreground"

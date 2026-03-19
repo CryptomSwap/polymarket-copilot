@@ -50,7 +50,7 @@ export async function buildDataset(funderAddress?: string): Promise<BuildDataset
     orderBy: { createdAt: "desc" },
   });
   const totalExposure = snapshot ? parseNum(snapshot.totalOpenExposure) : 0;
-  const topConcentrationPct = snapshot ? parseNum(snapshot.topConcentrationPct) : 0;
+  const topThemeConcentrationPct = snapshot ? parseNum(snapshot.topThemeConcentrationPct) : 0;
 
   const positions = await prisma.derivedPosition.findMany({
     where: { funderAddress: funder },
@@ -132,7 +132,7 @@ export async function buildDataset(funderAddress?: string): Promise<BuildDataset
           longshotComponent: rec.marketSignal.longshotComponent,
           timeComponent: rec.marketSignal.timeComponent,
           themeExposurePct: toStr(themeExposurePct),
-          topConcentrationPct: toStr(topConcentrationPct),
+          topThemeConcentrationPct: toStr(topThemeConcentrationPct),
           hasExistingPosition,
           reservedExposure: toStr(reservedExposure),
           linkedNewsCount,
@@ -158,7 +158,7 @@ export async function buildDataset(funderAddress?: string): Promise<BuildDataset
           edge: rec.marketSignal.edge,
           confidence: rec.marketSignal.confidence,
           themeExposurePct: toStr(themeExposurePct),
-          topConcentrationPct: toStr(topConcentrationPct),
+          topThemeConcentrationPct: toStr(topThemeConcentrationPct),
           hasExistingPosition,
           linkedNewsCount,
           newsFreshnessScore: toStr(newsFreshness),
@@ -218,7 +218,7 @@ export async function loadTrainingData(
       portfolioComponent: ex.portfolioComponent,
       behaviorComponent: ex.behaviorComponent,
       themeExposurePct: ex.themeExposurePct,
-      topConcentrationPct: ex.topConcentrationPct,
+      topThemeConcentrationPct: ex.topThemeConcentrationPct,
       hasExistingPosition: ex.hasExistingPosition,
       linkedNewsCount: ex.linkedNewsCount,
       newsFreshnessScore: ex.newsFreshnessScore,
@@ -309,7 +309,7 @@ export async function loadTrainingDataTimeSplit(
         portfolioComponent: ex.portfolioComponent,
         behaviorComponent: ex.behaviorComponent,
         themeExposurePct: ex.themeExposurePct,
-        topConcentrationPct: ex.topConcentrationPct,
+        topThemeConcentrationPct: ex.topThemeConcentrationPct,
         hasExistingPosition: ex.hasExistingPosition,
         linkedNewsCount: ex.linkedNewsCount,
         newsFreshnessScore: ex.newsFreshnessScore,
@@ -416,7 +416,7 @@ export async function loadTrainingDataWalkForward(
           portfolioComponent: ex.portfolioComponent,
           behaviorComponent: ex.behaviorComponent,
           themeExposurePct: ex.themeExposurePct,
-          topConcentrationPct: ex.topConcentrationPct,
+          topThemeConcentrationPct: ex.topThemeConcentrationPct,
           hasExistingPosition: ex.hasExistingPosition,
           linkedNewsCount: ex.linkedNewsCount,
           newsFreshnessScore: ex.newsFreshnessScore,

@@ -12,7 +12,10 @@ export interface CanonicalPositionInsightTimingInput {
 }
 
 export interface CanonicalPositionInsightQualityInput {
-  hasFullMarketMetadata?: boolean;
+  /** True when linked to canonical market. */
+  isResolved?: boolean;
+  /** True when all required display metadata present. */
+  hasCompleteDisplayMetadata?: boolean;
   hasPriceContext?: boolean;
   warnings?: string[];
 }
@@ -76,7 +79,7 @@ export function computeCanonicalPositionInsight(
     lastSyncMs > 0 &&
     Date.now() - lastSyncMs > staleSyncHours * 60 * 60 * 1000;
 
-  const unresolvedCatalog = !(quality?.hasFullMarketMetadata ?? false);
+  const unresolvedCatalog = !(quality?.isResolved ?? false);
   const hasPriceContext = quality?.hasPriceContext ?? false;
   const warnings = Array.isArray(quality?.warnings) ? [...quality.warnings] : [];
 

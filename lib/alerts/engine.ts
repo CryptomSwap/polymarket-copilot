@@ -2,11 +2,16 @@
  * Alert Engine v1: proactive portfolio and recommendation alerts.
  * Deterministic, threshold-based. Dedupes by (funder, type, dedupeKey).
  * No autonomous trading; alerts only.
+ *
+ * Feed: getAlertFeed() merges persisted DriftAlerts with computed portfolio-intelligence
+ * flags into a single normalized feed (no new DB tables; engine alerts are computed only).
  */
 
 import { prisma } from "@/lib/db";
 import { getPortfolioIntelligence } from "@/lib/portfolio/intelligence";
+import type { PortfolioIntelligence } from "@/lib/portfolio/intelligence";
 import type { CopilotAlertPayload, CopilotAlertSeverity, CopilotAlertType } from "./types";
+import type { AlertFeedItem, AlertFeedSeverity, AlertFeedSource } from "./types";
 
 // Reuse PI thresholds so alerts align with intelligence flags
 const CONCENTRATION_BREACH_PCT = 35;
@@ -83,22 +88,22 @@ export async function generateAlerts(funderAddress: string): Promise<GenerateAle
   }
 
   const { summary, buckets } = intelligence;
-  const topConcentrationPct = summary.topConcentrationPct ?? 0;
+  const topThemeConcentrationPct = summary.topThemeConcentrationPct ?? 0;
   const nearResolutionCount = summary.nearResolutionPositions ?? 0;
   const staleCount = summary.stalePositions ?? 0;
   const unresolvedCount = summary.unresolvedPositions ?? 0;
 
-  // --- CONCENTRATION_BREACH ---
-  if (summary.totalPositions > 0 && topConcentrationPct >= CONCENTRATION_BREACH_PCT) {
+  // --- CONCENTRATION_BREACH (theme concentration) ---
+  if (summary.totalPositions > 0 && topThemeConcentrationPct >= CONCENTRATION_BREACH_PCT) {
     const severity: CopilotAlertSeverity =
-      topConcentrationPct >= 60 ? "critical" : topConcentrationPct >= 45 ? "warning" : "info";
+      topThemeConcentrationPct >= 60 ? "critical" : topThemeConcentrationPct >= 45 ? "warning" : "info";
     const payload: CopilotAlertPayload = {
       type: "CONCENTRATION_BREACH",
       severity,
-      title: "High concentration",
-      message: `Top position concentration is ${topConcentrationPct.toFixed(1)}% of portfolio. Consider trimming exposure.`,
-      dedupeKey: `concentration_${Math.round(topConcentrationPct)}`,
-      metadata: { topConcentrationPct, theme: buckets.byTheme[0]?.key },
+      title: "High theme concentration",
+      message: `Top theme concentration is ${topThemeConcentrationPct.toFixed(1)}% of portfolio. Consider trimming exposure.`,
+      dedupeKey: `concentration_${Math.round(topThemeConcentrationPct)}`,
+      metadata: { topThemeConcentrationPct, theme: buckets.byTheme[0]?.key },
     };
     if (await createIfNotDeduped(funder, payload)) result.created++;
     else result.skippedByDedupe++;
@@ -210,4 +215,119 @@ export async function generateAlerts(funderAddress: string): Promise<GenerateAle
   }
 
   return result;
+}
+
+// --- Alert feed (merge drift + engine; computed only for engine) ---
+
+/** Drift alert row as returned from DB / api/live/alerts. */
+export interface DriftAlertRowForFeed {
+  id: string;
+  alertType: string;
+  severity: string;
+  message: string;
+  polymarketOrderId?: string | null;
+  assetId?: string | null;
+  marketId?: string | null;
+  resolved?: boolean;
+  createdAt: Date | string;
+}
+
+export interface GetAlertFeedParams {
+  funderAddress: string;
+  /** Unresolved (or filtered) drift alerts. When not provided and source includes drift, caller must fetch. */
+  driftAlerts?: DriftAlertRowForFeed[] | null;
+  /** Portfolio intelligence (flags + diagnostics.asOf). When not provided and source includes engine, caller must fetch. */
+  intelligence?: PortfolioIntelligence | null;
+  source?: "all" | "drift" | "engine";
+  limit?: number;
+}
+
+const FLAG_SEVERITY_TO_FEED: Record<string, AlertFeedSeverity> = {
+  low: "info",
+  medium: "warning",
+  high: "critical",
+};
+
+const ENGINE_FLAG_TITLE: Record<string, string> = {
+  HIGH_CONCENTRATION: "High concentration",
+  NEAR_RESOLUTION_CLUSTER: "Positions nearing resolution",
+  STALE_SYNC_CLUSTER: "Stale sync",
+  UNRESOLVED_CATALOG_POSITIONS: "Unresolved catalog positions",
+  LARGE_LOSS: "Large unrealized loss",
+  LARGE_GAIN: "Large unrealized gain",
+};
+
+function mapDriftSeverity(s: string): AlertFeedSeverity {
+  const lower = (s ?? "").toLowerCase();
+  if (lower === "critical") return "critical";
+  if (lower === "warning") return "warning";
+  return "info";
+}
+
+/**
+ * Build normalized alert feed from drift alerts + portfolio intelligence flags.
+ * One alert per drift item; one alert per intelligence flag (cluster-style flags = one summary alert).
+ * No persistence for engine items; drift items reference driftAlertId for resolve API.
+ */
+export function getAlertFeed(params: GetAlertFeedParams): AlertFeedItem[] {
+  const {
+    funderAddress: _funder,
+    driftAlerts = [],
+    intelligence,
+    source = "all",
+    limit = 50,
+  } = params;
+
+  const items: AlertFeedItem[] = [];
+
+  if (source === "drift" || source === "all") {
+    const list = Array.isArray(driftAlerts) ? driftAlerts : [];
+    for (const a of list) {
+      const createdAt =
+        typeof a.createdAt === "string" ? a.createdAt : a.createdAt?.toISOString?.() ?? new Date().toISOString();
+      items.push({
+        id: a.id,
+        type: a.alertType,
+        severity: mapDriftSeverity(a.severity),
+        title: a.alertType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) || "Sync issue",
+        message: a.message ?? "",
+        source: "drift" as AlertFeedSource,
+        driftAlertId: a.id,
+        entityRefs: {
+          assetId: a.assetId ?? null,
+          marketId: a.marketId ?? null,
+          polymarketOrderId: a.polymarketOrderId ?? null,
+        },
+        createdAt,
+      });
+    }
+  }
+
+  if ((source === "engine" || source === "all") && intelligence?.flags?.length) {
+    const asOf = intelligence.diagnostics?.asOf ?? new Date().toISOString();
+    intelligence.flags.forEach((flag, idx) => {
+      const feedSeverity: AlertFeedSeverity =
+        FLAG_SEVERITY_TO_FEED[flag.severity] ?? "info";
+      const title = ENGINE_FLAG_TITLE[flag.code] ?? flag.code.replace(/_/g, " ");
+      items.push({
+        id: `engine_${flag.code}_${idx}`,
+        type: flag.code,
+        severity: feedSeverity,
+        title,
+        message: flag.message ?? "",
+        source: "engine" as AlertFeedSource,
+        entityRefs: undefined,
+        createdAt: asOf,
+        asOf,
+      });
+    });
+  }
+
+  items.sort((a, b) => {
+    const tA = new Date(a.createdAt).getTime();
+    const tB = new Date(b.createdAt).getTime();
+    return tB - tA;
+  });
+
+  return items.slice(0, Math.max(0, limit));
 }

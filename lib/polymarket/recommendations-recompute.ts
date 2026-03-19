@@ -63,7 +63,7 @@ export async function recomputeRecommendations(
     orderBy: { createdAt: "desc" },
   });
   const totalExposure = snapshot ? parseFloat(snapshot.totalOpenExposure || "0") : 0;
-  const topConcentrationPct = snapshot ? parseFloat(snapshot.topConcentrationPct || "0") : 0;
+  const topThemeConcentrationPct = snapshot ? parseFloat(snapshot.topThemeConcentrationPct || "0") : 0;
 
   const themeExposureMap = new Map<string, number>();
   const positions = await prisma.derivedPosition.findMany({
@@ -186,7 +186,7 @@ export async function recomputeRecommendations(
         hasPositionInAsset,
         positionMarketValue,
         themeExposurePct,
-        topConcentrationPct,
+        topThemeConcentrationPct,
         newsCatalystBoost: newsInfluence?.catalystBoost,
         newsSaturationPenalty: newsInfluence?.saturationPenalty,
         heldMarketIds,

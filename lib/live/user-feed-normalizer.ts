@@ -85,6 +85,8 @@ export interface NormalizedUserFeedResult {
   lifecycle: NormalizedUserFeedLifecycle | null;
   /** For fills: apply to runtime position store even when order not in our lifecycle store. */
   positionFill: NormalizedFillInput | null;
+  /** Unique exchange fill/trade id for durable ledger deduplication. Set for TRADE and partial_fill. */
+  exchangeFillId: string | null;
 }
 
 /**
@@ -98,10 +100,18 @@ export function normalizeUserFeedMessage(
 ): NormalizedUserFeedResult | null {
   if (data == null || typeof data !== "object") return null;
   const obj = data as Record<string, unknown>;
-  const rawType = typeof obj.type === "string" ? obj.type : "";
-  const type = rawType.toUpperCase();
-  const eventType = (typeof obj.event_type === "string" ? obj.event_type : rawType).toLowerCase();
   const payload = (obj.payload && typeof obj.payload === "object" ? obj.payload : obj) as Record<string, unknown>;
+  // Polymarket sometimes places `type` only on the nested payload; honor root or inner.
+  const rawType =
+    typeof obj.type === "string" ? obj.type : typeof payload.type === "string" ? payload.type : "";
+  const type = rawType.toUpperCase();
+  const eventType = (
+    typeof obj.event_type === "string"
+      ? obj.event_type
+      : typeof payload.event_type === "string"
+        ? payload.event_type
+        : rawType
+  ).toLowerCase();
 
   const assetId = typeof payload.asset_id === "string" ? payload.asset_id : typeof obj.asset_id === "string" ? obj.asset_id : undefined;
   const marketId = typeof payload.market === "string" ? payload.market : typeof obj.market === "string" ? obj.market : undefined;
@@ -122,6 +132,7 @@ export function normalizeUserFeedMessage(
         funderAddress,
         lifecycle: { kind: "ack", exchangeOrderId, at },
         positionFill: null,
+        exchangeFillId: null,
       };
     }
     if (orderSubType === "CANCELLATION") {
@@ -129,12 +140,14 @@ export function normalizeUserFeedMessage(
         funderAddress,
         lifecycle: { kind: "cancel", exchangeOrderId, at },
         positionFill: null,
+        exchangeFillId: null,
       };
     }
     if (orderSubType === "UPDATE") {
       const sizeMatched = safeNum(payload.size_matched ?? payload.sizeMatched);
       const price = safeNum(payload.price);
       if (sizeMatched != null && sizeMatched >= 0 && price != null) {
+        const exchangeFillId = `order:${exchangeOrderId}:${sizeMatched}:${price}:${at.getTime()}`;
         return {
           funderAddress,
           lifecycle: {
@@ -146,6 +159,7 @@ export function normalizeUserFeedMessage(
             fillPrice: price,
           },
           positionFill: null,
+          exchangeFillId,
         };
       }
     }
@@ -165,6 +179,14 @@ export function normalizeUserFeedMessage(
           : firstMaker && typeof firstMaker.order_id === "string"
             ? firstMaker.order_id
             : undefined;
+    const exchangeFillId =
+      typeof payload.id === "string"
+        ? payload.id
+        : typeof payload.trade_id === "string"
+          ? payload.trade_id
+          : exchangeOrderId
+            ? `trade:${exchangeOrderId}:${at.getTime()}`
+            : null;
     const size = safeNum(payload.size ?? payload.matched_amount ?? firstMaker?.matched_amount);
     const price = safeNum(payload.price ?? firstMaker?.price);
     const side = safeSide(payload.side);
@@ -192,6 +214,7 @@ export function normalizeUserFeedMessage(
           ? { kind: "fill", exchangeOrderId, at, totalFilledSize: size, avgPrice: price }
           : null,
         positionFill,
+        exchangeFillId,
       };
     }
     if (status === "FAILED") {
@@ -199,9 +222,10 @@ export function normalizeUserFeedMessage(
         funderAddress,
         lifecycle: exchangeOrderId ? { kind: "reject", exchangeOrderId, at, reason: "trade_failed" } : null,
         positionFill: null,
+        exchangeFillId: null,
       };
     }
-    return { funderAddress, lifecycle: null, positionFill };
+    return { funderAddress, lifecycle: null, positionFill, exchangeFillId };
   }
 
   return null;

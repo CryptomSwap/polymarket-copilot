@@ -12,5 +12,8 @@ export async function GET() {
   return NextResponse.json({
     connected: false,
     message: "WebSocket runs server-side; connection status not yet exposed. Run user sync and Reconcile to refresh order state.",
+    /** For runtime stream health (connected, heartbeat, data freshness, reconciled, safeToAutomate), use GET /api/live/stream-health or GET /api/ops/runtime/health. */
+    streamHealthUrl: "/api/live/stream-health",
+    opsHealthUrl: "/api/ops/runtime/health",
   });
 }

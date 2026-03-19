@@ -215,6 +215,8 @@ export interface OrderPartialFillPayload {
   remainingSize: number;
   fillPrice: number;
   filledAt: Date;
+  /** Durable fill ledger id; used to mark applied and avoid double-apply on replay. */
+  exchangeFillId?: string | null;
 }
 
 export interface OrderFilledPayload {
@@ -227,6 +229,8 @@ export interface OrderFilledPayload {
   totalFilledSize: number;
   avgPrice: number;
   filledAt: Date;
+  /** Durable fill ledger id; used to mark applied and avoid double-apply on replay. */
+  exchangeFillId?: string | null;
 }
 
 export interface OrderCanceledPayload {

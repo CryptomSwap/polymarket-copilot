@@ -55,16 +55,15 @@ export class InMemoryRuntimeEventBus implements RuntimeEventBus {
     const run = (entry: HandlerEntry): void => {
       try {
         const result = entry.handler(event as RuntimeEvent);
-        if (result && typeof (result as Promise<unknown>).then === "function") {
-          (result as Promise<void>).catch((err) => {
-            // Isolate: log but do not rethrow; other handlers still run.
-            console.error("[runtime-event-bus] handler promise rejected", {
-              type: event.type,
-              id: event.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
+        Promise.resolve(result).catch((err) => {
+          // Isolate: log but do not rethrow; other handlers still run.
+          // Promise.resolve() ensures sync/undefined returns don't cause .catch on undefined.
+          console.error("[runtime-event-bus] handler promise rejected", {
+            type: event.type,
+            id: event.id,
+            error: err instanceof Error ? err.message : String(err),
           });
-        }
+        });
       } catch (err) {
         // Isolate: one handler cannot crash others.
         console.error("[runtime-event-bus] handler threw", {

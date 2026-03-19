@@ -135,16 +135,23 @@ async function run(): Promise<void> {
     check(r5.degraded === true, "degraded when stale asset ratio high");
     check(r5.reasons.includes("stale_asset_ratio_high"), "reason stale_asset_ratio_high");
 
+    const openStateWithData: StreamConnectionState = {
+      ...createInitialStreamConnectionState(),
+      status: "open",
+      lastOpenAt: new Date(),
+      lastMessageAt: new Date(),
+      lastDataEventAt: new Date(),
+    };
     const r6 = computeDegraded({
-      marketConnection: openState,
-      userConnection: openState,
+      marketConnection: openStateWithData,
+      userConnection: openStateWithData,
       diagnostics: null,
       schedulerBacklog: 0,
       staleAssetCount: 0,
       degradedAssetCount: 0,
       trackedAssetCount: 10,
     });
-    check(r6.degraded === false, "not degraded when all healthy");
+    check(r6.degraded === false, "not degraded when all healthy (real data flowing)");
     check(r6.reasons.length === 0, "no reasons when healthy");
   }
 

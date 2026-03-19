@@ -192,14 +192,15 @@ async function run(): Promise<void> {
     });
     orderStore.applyAck("ord-u", "ex-u");
 
-    const telemetry = { lifecycleApplied: 0, unmatchedOrderEvents: 0, lifecycleMismatch: 0 };
-    feedUserFeedResultToRuntime(
+    const telemetry = { lifecycleApplied: 0, unmatchedOrderEvents: 0, lifecycleMismatch: 0, fillLedgerDuplicatesSkipped: 0 };
+    await feedUserFeedResultToRuntime(
       {
         funderAddress: "f1",
         lifecycle: { kind: "fill", exchangeOrderId: "ex-u", at: new Date(), totalFilledSize: 5, avgPrice: 0.5 },
         positionFill: { funderAddress: "f1", assetId: "a4", marketId: "m4", outcome: "", side: "BUY", size: 5, price: 0.5, filledAt: new Date() },
+        exchangeFillId: null,
       },
-      { orderStore, lifecycleHandler, telemetry }
+      { orderStore, lifecycleHandler, fillLedgerEnabled: false, telemetry }
     );
 
     check(telemetry.lifecycleApplied === 1, "lifecycle applied once");

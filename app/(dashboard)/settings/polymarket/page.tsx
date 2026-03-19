@@ -11,8 +11,18 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Wallet, CheckCircle2, AlertCircle, Loader2, KeyRound } from "lucide-react";
-import { connectMetaMask, hasMetaMask, shortenAddress } from "@/lib/wallet/metamask";
+import {
+  Wallet,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  KeyRound,
+} from "lucide-react";
+import {
+  connectMetaMask,
+  hasMetaMask,
+  shortenAddress,
+} from "@/lib/wallet/metamask";
 import { signPolymarketL1Auth } from "@/lib/wallet/polymarket-l1-sign";
 import { cn } from "@/lib/utils";
 
@@ -35,11 +45,16 @@ export default function SettingsPolymarketPage() {
   const [eoaAddress, setEoaAddress] = useState("");
   const [funderAddress, setFunderAddress] = useState("");
   const [signatureType, setSignatureType] = useState(2);
-  const [savedConnection, setSavedConnection] = useState<ConnectionData | null>(null);
+  const [savedConnection, setSavedConnection] = useState<ConnectionData | null>(
+    null,
+  );
   const [connectLoading, setConnectLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [initCredsLoading, setInitCredsLoading] = useState(false);
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [message, setMessage] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
   const [walletAvailable, setWalletAvailable] = useState(false);
 
   const fetchConnection = useCallback(async () => {
@@ -68,7 +83,10 @@ export default function SettingsPolymarketPage() {
     try {
       const address = await connectMetaMask();
       setEoaAddress(address);
-      setMessage({ type: "success", text: "Wallet connected. Enter funder address and Save." });
+      setMessage({
+        type: "success",
+        text: "Wallet connected. Enter funder address and Save.",
+      });
     } catch (err) {
       setMessage({
         type: "error",
@@ -81,7 +99,10 @@ export default function SettingsPolymarketPage() {
 
   const handleSaveConnection = async () => {
     if (!eoaAddress.trim() || !funderAddress.trim()) {
-      setMessage({ type: "error", text: "Connect MetaMask and enter the Polymarket funder address." });
+      setMessage({
+        type: "error",
+        text: "Connect MetaMask and enter the Polymarket funder address.",
+      });
       return;
     }
     setMessage(null);
@@ -99,8 +120,10 @@ export default function SettingsPolymarketPage() {
       const data = await res.json();
       if (!res.ok) {
         const details = data.details?.fieldErrors
-          ? Object.entries(data.details.fieldErrors).flatMap(([k, v]) => (v as string[]).map((e) => `${k}: ${e}`)).join(". ")
-          : data.error ?? "Save failed.";
+          ? Object.entries(data.details.fieldErrors)
+              .flatMap(([k, v]) => (v as string[]).map((e) => `${k}: ${e}`))
+              .join(". ")
+          : (data.error ?? "Save failed.");
         throw new Error(details);
       }
       setSavedConnection(data.connection);
@@ -119,7 +142,10 @@ export default function SettingsPolymarketPage() {
     const eoa = eoaAddress.trim().toLowerCase();
     const funder = funderAddress.trim().toLowerCase();
     if (!eoa || !funder) {
-      setMessage({ type: "error", text: "Connect MetaMask, enter funder address, and save the connection first." });
+      setMessage({
+        type: "error",
+        text: "Connect MetaMask, enter funder address, and save the connection first.",
+      });
       return;
     }
     setMessage(null);
@@ -132,18 +158,25 @@ export default function SettingsPolymarketPage() {
         timestamp,
         nonce,
       });
-      const polygonAddress = typeof address === "string" ? address.trim().toLowerCase() : "";
+      const polygonAddress =
+        typeof address === "string" ? address.trim().toLowerCase() : "";
       const sig = typeof signature === "string" ? signature : "";
       const ts = Number(timestamp);
       const n = Number(nonce);
       const st = Number(signatureType);
       if (!polygonAddress || !sig) {
-        setMessage({ type: "error", text: "Signing did not return a valid address or signature." });
+        setMessage({
+          type: "error",
+          text: "Signing did not return a valid address or signature.",
+        });
         return;
       }
-      const timestampNum = Number.isFinite(ts) ? ts : Math.floor(Date.now() / 1000);
+      const timestampNum = Number.isFinite(ts)
+        ? ts
+        : Math.floor(Date.now() / 1000);
       const nonceNum = Number.isFinite(n) && n >= 0 ? n : 0;
-      const signatureTypeNum = Number.isFinite(st) && st >= 0 && st <= 255 ? st : 2;
+      const signatureTypeNum =
+        Number.isFinite(st) && st >= 0 && st <= 255 ? st : 2;
 
       const payload = {
         polygonAddress,
@@ -172,11 +205,17 @@ export default function SettingsPolymarketPage() {
       if (!res.ok) {
         throw new Error(data.error ?? data.details ?? "Initialization failed");
       }
-      setMessage({ type: "success", text: data.message ?? "API credentials initialized and stored." });
+      setMessage({
+        type: "success",
+        text: data.message ?? "API credentials initialized and stored.",
+      });
     } catch (err) {
       setMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to initialize credentials.",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Failed to initialize credentials.",
       });
     } finally {
       setInitCredsLoading(false);
@@ -190,7 +229,8 @@ export default function SettingsPolymarketPage() {
           Polymarket settings
         </h2>
         <p className="mt-1 text-muted-foreground">
-          Connect your MetaMask EOA and link your Polymarket proxy/funder wallet. This is connection setup only; trading is not enabled yet.
+          Connect your MetaMask EOA and link your Polymarket proxy/funder
+          wallet. This is connection setup only; trading is not enabled yet.
         </p>
       </div>
 
@@ -211,10 +251,16 @@ export default function SettingsPolymarketPage() {
               <div className="min-w-0 space-y-1 text-sm">
                 <p className="font-medium text-foreground">Connection saved</p>
                 <p className="text-muted-foreground">
-                  EOA: <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{savedConnection.eoaAddress}</code>
+                  EOA:{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                    {savedConnection.eoaAddress}
+                  </code>
                 </p>
                 <p className="text-muted-foreground">
-                  Funder: <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{savedConnection.funderAddress}</code>
+                  Funder:{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                    {savedConnection.funderAddress}
+                  </code>
                 </p>
                 <p className="text-muted-foreground">
                   Signature type: {savedConnection.signatureType}
@@ -225,9 +271,12 @@ export default function SettingsPolymarketPage() {
             <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 p-4">
               <AlertCircle className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-500" />
               <div className="min-w-0 text-sm">
-                <p className="font-medium text-foreground">No connection saved</p>
+                <p className="font-medium text-foreground">
+                  No connection saved
+                </p>
                 <p className="text-muted-foreground">
-                  Connect MetaMask, enter your Polymarket funder address, and save to persist.
+                  Connect MetaMask, enter your Polymarket funder address, and
+                  save to persist.
                 </p>
               </div>
             </div>
@@ -243,7 +292,8 @@ export default function SettingsPolymarketPage() {
             Wallet connection
           </CardTitle>
           <CardDescription>
-            Your MetaMask EOA is the signer; your Polymarket trading wallet may be a proxy/funder and can differ.
+            Your MetaMask EOA is the signer; your Polymarket trading wallet may
+            be a proxy/funder and can differ.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -276,7 +326,8 @@ export default function SettingsPolymarketPage() {
             )}
             {!walletAvailable && (
               <p className="text-xs text-amber-600 dark:text-amber-500">
-                MetaMask (or compatible wallet) not detected. Install the extension and refresh.
+                MetaMask (or compatible wallet) not detected. Install the
+                extension and refresh.
               </p>
             )}
           </div>
@@ -291,7 +342,8 @@ export default function SettingsPolymarketPage() {
               className="font-mono text-sm"
             />
             <p className="text-xs text-muted-foreground">
-              The wallet that holds positions and funds on Polymarket; may differ from your EOA.
+              The wallet that holds positions and funds on Polymarket; may
+              differ from your EOA.
             </p>
           </div>
 
@@ -304,7 +356,7 @@ export default function SettingsPolymarketPage() {
               className={cn(
                 "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                "disabled:cursor-not-allowed disabled:opacity-50"
+                "disabled:cursor-not-allowed disabled:opacity-50",
               )}
             >
               {SIGNATURE_TYPES.map(({ value, label }) => (
@@ -314,7 +366,8 @@ export default function SettingsPolymarketPage() {
               ))}
             </select>
             <p className="text-xs text-muted-foreground">
-              Default is 2 (Poly Proxy). Change only if your setup uses a different type.
+              Default is 2 (Poly Proxy). Change only if your setup uses a
+              different type.
             </p>
           </div>
 
@@ -324,7 +377,7 @@ export default function SettingsPolymarketPage() {
                 "rounded-md border p-3 text-sm",
                 message.type === "success"
                   ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/50 dark:text-green-200"
-                  : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
+                  : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200",
               )}
             >
               {message.text}
@@ -352,12 +405,19 @@ export default function SettingsPolymarketPage() {
               Initialize API credentials
             </h4>
             <p className="mb-3 text-sm text-muted-foreground">
-              Sign with MetaMask to create or derive Polymarket API credentials. They are stored encrypted on the server. Save your connection above first.
+              Sign with MetaMask to create or derive Polymarket API credentials.
+              They are stored encrypted on the server. Save your connection
+              above first.
             </p>
             <Button
               type="button"
               onClick={handleInitializeCredentials}
-              disabled={!eoaAddress || !funderAddress || initCredsLoading || !walletAvailable}
+              disabled={
+                !eoaAddress ||
+                !funderAddress ||
+                initCredsLoading ||
+                !walletAvailable
+              }
             >
               {initCredsLoading ? (
                 <>
@@ -376,16 +436,20 @@ export default function SettingsPolymarketPage() {
       <Card className="border-muted/50 bg-muted/20">
         <CardHeader>
           <CardTitle className="text-base">About this connection</CardTitle>
-          <CardDescription>
-            What we store and how it’s used
-          </CardDescription>
+          <CardDescription>What we store and how it’s used</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
           <p>
-            We store your EOA address (from MetaMask), your Polymarket funder/proxy address, and signature type in our database. This links your identity to your Polymarket trading wallet for future features (e.g. syncing positions, activity). We do not store private keys or API keys here.
+            We store your EOA address (from MetaMask), your Polymarket
+            funder/proxy address, and signature type in our database. This links
+            your identity to your Polymarket trading wallet for future features
+            (e.g. syncing positions, activity). We do not store private keys or
+            API keys here.
           </p>
           <p>
-            Signature type 2 is the usual choice when trading via Polymarket’s proxy wallet. Use 1 only if you trade directly with your EOA, or another value if your setup requires it.
+            Signature type 2 is the usual choice when trading via Polymarket’s
+            proxy wallet. Use 1 only if you trade directly with your EOA, or
+            another value if your setup requires it.
           </p>
         </CardContent>
       </Card>

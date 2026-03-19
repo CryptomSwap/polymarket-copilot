@@ -208,7 +208,10 @@ export async function derivePositionsFromFills(funderAddress: string): Promise<{
 }> {
   const fills = await prisma.userFill.findMany({
     where: { funderAddress },
-    orderBy: { syncedAt: "asc" },
+    orderBy: [
+      { matchTime: "asc" },
+      { tradeId: "asc" },
+    ],
   });
 
   const byAsset = new Map<
@@ -224,14 +227,20 @@ export async function derivePositionsFromFills(funderAddress: string): Promise<{
   >();
 
   const normalizeAssetId = (id: string) => String(id ?? "").trim();
+  const seenFillSignature = new Set<string>();
   for (const f of fills) {
+    const matchTime = f.matchTime ? new Date(f.matchTime) : null;
+    const timeKey = matchTime ? String(Math.floor(matchTime.getTime() / 1000)) : "";
+    const fillSignature = `${normalizeAssetId(f.assetId)}|${timeKey}|${String(f.size).trim()}|${String(f.side).trim()}`;
+    if (seenFillSignature.has(fillSignature)) continue;
+    seenFillSignature.add(fillSignature);
+
     const mult = f.side === "BUY" ? 1 : -1;
     const sizeShares = sizeToShares(parseNum(f.size), f.size) * mult;
     const price = parseNum(f.price);
     const cost = sizeShares * price;
     const key = normalizeAssetId(f.assetId);
     const existing = byAsset.get(key);
-    const matchTime = f.matchTime ? new Date(f.matchTime) : null;
 
     if (!existing) {
       byAsset.set(key, {

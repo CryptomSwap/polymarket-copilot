@@ -12,8 +12,8 @@ import type {
 } from "./bot-decision-types";
 import type { BotRuntimeContextProvider } from "./bot-context";
 import { buildBotDecisionContext } from "./bot-context";
-import { EventDrivenBotScheduler } from "./bot-scheduler";
-import type { TriggerPriority } from "./bot-scheduler";
+import { EventDrivenBotScheduler, DEFAULT_SCHEDULER_OVERLOAD_CONFIG } from "./bot-scheduler";
+import type { TriggerPriority, SchedulerOverloadConfig, SchedulerDiagnosticsCallback } from "./bot-scheduler";
 import type { RuntimeEvent } from "../events/runtime-events";
 import { evaluateLiveStrategyPlaceholder } from "./live-strategy-placeholder";
 import type { LiveStrategyPlaceholderConfig } from "./live-strategy-placeholder";
@@ -40,6 +40,10 @@ export interface BotRuntimeOptions {
   strategyId: string;
   /** Coalesce window in ms for the event-driven scheduler (e.g. 25–100). */
   coalesceMs: number;
+  /** Optional: overload protection (max queue, thresholds). */
+  schedulerOverloadConfig?: SchedulerOverloadConfig;
+  /** Optional: record coalesced/dropped/latency/overload for diagnostics. */
+  schedulerDiagnostics?: SchedulerDiagnosticsCallback;
   /** Optional: provide open orders for an asset (e.g. from OrderLifecycleStore). */
   getOpenOrdersForAsset?: (funderAddress: string, assetId: string) => import("../order-manager/order-manager").RuntimeOrderState[];
   /** Optional: market store for getTrackedAssetIds on risk/global events. */
@@ -78,6 +82,8 @@ export class DefaultBotRuntime implements BotRuntime {
         coalesceMs: options.coalesceMs,
         funderAddress: options.funderAddress,
         strategyId: options.strategyId,
+        overloadConfig: options.schedulerOverloadConfig ?? DEFAULT_SCHEDULER_OVERLOAD_CONFIG,
+        schedulerDiagnostics: options.schedulerDiagnostics,
       },
       (envelope) => this.handleDecision(envelope)
     );

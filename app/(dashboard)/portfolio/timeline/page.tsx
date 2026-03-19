@@ -10,30 +10,38 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Loader2, RefreshCw, TrendingUp, TrendingDown, Minus, Lightbulb, Bell, Camera } from "lucide-react";
+import { ArrowLeft, Loader2, RefreshCw, Bell, FileText, Lightbulb, Package, ClipboardCheck, BookOpen, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type TimelineEventType =
-  | "position_opened"
-  | "position_increased"
-  | "position_reduced"
-  | "recommendation_created"
-  | "recommendation_lifecycle"
-  | "alert_triggered"
-  | "portfolio_snapshot";
-
-interface TimelineEvent {
+/** Normalized timeline item from GET /api/portfolio/timeline */
+interface TimelineItem {
   id: string;
-  type: TimelineEventType;
-  occurredAt: string;
+  eventType: string;
+  source: string;
   title: string;
   message: string;
-  marketId?: string | null;
-  assetId?: string | null;
-  recommendationId?: string | null;
-  alertId?: string | null;
+  severity: string | null;
+  entityRefs: {
+    recommendationId?: string | null;
+    marketId?: string | null;
+    assetId?: string | null;
+    orderId?: string | null;
+    journalEntryId?: string | null;
+  };
+  createdAt: string;
   metadata?: Record<string, unknown>;
 }
+
+const SOURCE_OPTIONS = [
+  { value: "all", label: "All sources" },
+  { value: "drift", label: "Drift" },
+  { value: "behavior", label: "Behavior" },
+  { value: "recommendation", label: "Recommendation" },
+  { value: "execution", label: "Execution" },
+  { value: "reconciliation", label: "Reconciliation" },
+  { value: "journal", label: "Journal" },
+  { value: "copilot", label: "Copilot" },
+] as const;
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -48,37 +56,41 @@ function formatDate(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-function EventIcon({ type }: { type: TimelineEventType }) {
+function SourceIcon({ source }: { source: string }) {
   const cls = "h-4 w-4 shrink-0";
-  switch (type) {
-    case "position_opened":
-      return <Minus className={cn(cls, "text-primary")} />;
-    case "position_increased":
-      return <TrendingUp className={cn(cls, "text-green-600 dark:text-green-500")} />;
-    case "position_reduced":
-      return <TrendingDown className={cn(cls, "text-amber-600 dark:text-amber-500")} />;
-    case "recommendation_created":
-    case "recommendation_lifecycle":
+  switch (source) {
+    case "drift":
+      return <AlertTriangle className={cn(cls, "text-amber-600 dark:text-amber-500")} />;
+    case "behavior":
+      return <Bell className={cn(cls, "text-muted-foreground")} />;
+    case "recommendation":
       return <Lightbulb className={cn(cls, "text-muted-foreground")} />;
-    case "alert_triggered":
+    case "execution":
+      return <Package className={cn(cls, "text-green-600 dark:text-green-500")} />;
+    case "reconciliation":
+      return <ClipboardCheck className={cn(cls, "text-muted-foreground")} />;
+    case "journal":
+      return <BookOpen className={cn(cls, "text-muted-foreground")} />;
+    case "copilot":
       return <Bell className={cn(cls, "text-amber-600 dark:text-amber-500")} />;
-    case "portfolio_snapshot":
-      return <Camera className={cn(cls, "text-muted-foreground")} />;
     default:
-      return <Minus className={cn(cls, "text-muted-foreground")} />;
+      return <FileText className={cn(cls, "text-muted-foreground")} />;
   }
 }
 
 export default function PortfolioTimelinePage() {
-  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [events, setEvents] = useState<TimelineItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
 
   const fetchTimeline = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/portfolio/timeline?limit=80");
+      const params = new URLSearchParams({ limit: "100" });
+      if (sourceFilter !== "all") params.set("source", sourceFilter);
+      const res = await fetch(`/api/portfolio/timeline?${params.toString()}`);
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "Failed to load timeline.");
@@ -92,7 +104,7 @@ export default function PortfolioTimelinePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sourceFilter]);
 
   useEffect(() => {
     fetchTimeline();
@@ -112,7 +124,7 @@ export default function PortfolioTimelinePage() {
             Portfolio timeline
           </h2>
           <p className="text-muted-foreground text-sm mt-1">
-            How your portfolio evolved: position opens and changes, recommendations, alerts, and snapshots. Reverse chronological.
+            Chronological feed of drift alerts, behavior flags, recommendations, execution outcomes, reconciliation, journal entries, and copilot alerts.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={fetchTimeline} disabled={loading}>
@@ -125,8 +137,22 @@ export default function PortfolioTimelinePage() {
         <CardHeader>
           <CardTitle className="text-base">Timeline</CardTitle>
           <CardDescription>
-            Position opened / increased / reduced (from fills), new recommendations and lifecycle events, alerts, and portfolio snapshots.
+            Newest first. Filter by source to narrow the feed.
           </CardDescription>
+          <div className="pt-2">
+            <select
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+              aria-label="Filter by source"
+            >
+              {SOURCE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </CardHeader>
         <CardContent>
           {loading && events.length === 0 ? (
@@ -138,7 +164,7 @@ export default function PortfolioTimelinePage() {
             <p className="text-sm text-destructive py-4">{error}</p>
           ) : events.length === 0 ? (
             <p className="text-sm text-muted-foreground py-8">
-              No timeline events yet. Sync orders and run recompute to populate fills and snapshots.
+              No timeline events for this filter. Try &quot;All sources&quot; or run sync and recompute to populate data.
             </p>
           ) : (
             <ul className="space-y-0 divide-y divide-border">
@@ -146,28 +172,40 @@ export default function PortfolioTimelinePage() {
                 <li key={ev.id} className="py-3 first:pt-0">
                   <div className="flex gap-3">
                     <div className="mt-0.5">
-                      <EventIcon type={ev.type} />
+                      <SourceIcon source={ev.source} />
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-2">
                         <span className="font-medium text-foreground">{ev.title}</span>
                         <span className="text-xs text-muted-foreground tabular-nums">
-                          {formatDate(ev.occurredAt)}
+                          {formatDate(ev.createdAt)}
                         </span>
+                        <span
+                          className={cn(
+                            "text-xs rounded px-1.5 py-0.5 bg-muted text-muted-foreground",
+                            ev.severity === "high" && "bg-red-500/10 text-red-700 dark:text-red-400",
+                            ev.severity === "warning" && "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                          )}
+                        >
+                          {ev.source}
+                        </span>
+                        {ev.severity && (
+                          <span className="text-xs text-muted-foreground">{ev.severity}</span>
+                        )}
                       </div>
                       <p className="text-sm text-muted-foreground mt-0.5 truncate" title={ev.message}>
                         {ev.message}
                       </p>
                       <div className="flex flex-wrap gap-2 mt-1.5">
-                        {ev.recommendationId && (
+                        {ev.entityRefs.recommendationId && (
                           <Link
-                            href={`/recommendations/${ev.recommendationId}`}
+                            href={`/recommendations/${ev.entityRefs.recommendationId}`}
                             className="text-xs text-primary hover:underline"
                           >
                             View recommendation →
                           </Link>
                         )}
-                        {ev.marketId && !ev.recommendationId && (
+                        {ev.entityRefs.marketId && !ev.entityRefs.recommendationId && (
                           <Link href="/portfolio" className="text-xs text-primary hover:underline">
                             Portfolio →
                           </Link>

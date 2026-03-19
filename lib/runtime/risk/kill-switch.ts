@@ -20,6 +20,13 @@ export interface KillSwitchState {
   haltedAssetIds: string[];
 }
 
+/** Optional callback for structured logging of global stop transitions (from -> to, reason). */
+export type KillSwitchTransitionLogFn = (
+  fromStopped: boolean,
+  toStopped: boolean,
+  reason: string | null
+) => void;
+
 export interface KillSwitch {
   getState(): KillSwitchState;
   /** True if global stop is active. */
@@ -65,6 +72,12 @@ function emitKillSwitchChanged(
   eventBus.publish(event);
 }
 
+export interface InMemoryKillSwitchOptions {
+  eventBus?: RuntimeEventBus;
+  /** Called on every global stop transition (fromStopped, toStopped, reason). */
+  logTransition?: KillSwitchTransitionLogFn;
+}
+
 /**
  * In-memory kill switch with optional event bus for risk.kill_switch_changed.
  */
@@ -76,9 +89,11 @@ export class InMemoryKillSwitch implements KillSwitch {
     haltedAssetIds: [],
   };
   private readonly eventBus: RuntimeEventBus | undefined;
+  private readonly logTransition: KillSwitchTransitionLogFn | undefined;
 
-  constructor(options?: { eventBus?: RuntimeEventBus }) {
+  constructor(options?: InMemoryKillSwitchOptions) {
     this.eventBus = options?.eventBus;
+    this.logTransition = options?.logTransition;
   }
 
   getState(): KillSwitchState {
@@ -98,18 +113,22 @@ export class InMemoryKillSwitch implements KillSwitch {
 
   setGlobalStop(reason?: string): void {
     if (this.state.globalEnabled) return;
+    const fromStopped = this.state.globalEnabled;
     this.state.globalEnabled = true;
     this.state.globalReason = reason ?? "manual";
     this.state.globalTriggeredAt = new Date();
+    this.logTransition?.(fromStopped, true, this.state.globalReason);
     emitKillSwitchChanged(this.eventBus, true, this.state.globalReason);
   }
 
   clearGlobalStop(): void {
     if (!this.state.globalEnabled) return;
-    this.state.globalEnabled = false;
+    const fromStopped = this.state.globalEnabled;
     const prevReason = this.state.globalReason;
+    this.state.globalEnabled = false;
     this.state.globalReason = null;
     this.state.globalTriggeredAt = null;
+    this.logTransition?.(fromStopped, false, prevReason);
     emitKillSwitchChanged(this.eventBus, false, prevReason);
   }
 

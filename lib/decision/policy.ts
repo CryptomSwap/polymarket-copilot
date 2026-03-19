@@ -1,4 +1,8 @@
 /**
+ * @deprecated Legacy policy layer. The active decision path uses the staged decision engine
+ * (evaluate-staged.ts + stages/*). Recompute does not use this module. Kept for reference only;
+ * do not use in new code. See docs/DECISION_ENGINE_STAGED_MODEL.md and docs/ARCHITECTURE_CONSOLIDATION.md.
+ *
  * Policy state and size guidance. Hard blocks remain authoritative; ML cannot override.
  * Advisory only; no autonomous trading.
  */
@@ -20,7 +24,8 @@ export interface PolicyInput {
   blendedScore: number;
   reasoning: ReasoningBreakdown;
   themeExposurePct: number;
-  topConcentrationPct: number;
+  /** Largest theme % of portfolio (used for concentration blocks). */
+  topThemeConcentrationPct: number;
   hasExistingPosition: boolean;
   suggestedSizeFromRec: number;
   reviewStatus: string;
@@ -49,7 +54,7 @@ export function applyPolicy(input: PolicyInput): PolicyResult {
     blendedScore,
     reasoning,
     themeExposurePct,
-    topConcentrationPct,
+    topThemeConcentrationPct,
     hasExistingPosition,
     suggestedSizeFromRec,
     reviewStatus,
@@ -58,8 +63,8 @@ export function applyPolicy(input: PolicyInput): PolicyResult {
 
   let blockReason: string | null = null;
   if (blockedReason) blockReason = blockedReason;
-  if (topConcentrationPct >= CONCENTRATION_BLOCK_PCT && action !== "TRIM" && action !== "EXIT") {
-    blockReason = blockReason ?? `Concentration ${topConcentrationPct.toFixed(0)}% exceeds limit.`;
+  if (topThemeConcentrationPct >= CONCENTRATION_BLOCK_PCT && action !== "TRIM" && action !== "EXIT") {
+    blockReason = blockReason ?? `Theme concentration ${topThemeConcentrationPct.toFixed(0)}% exceeds limit.`;
   }
   if (reasoning.blockers.some((b) => b.toLowerCase().includes("chase") || b.toLowerCase().includes("late"))) {
     blockReason = blockReason ?? "Chase/late setup; review required.";
@@ -106,7 +111,7 @@ export function applyPolicy(input: PolicyInput): PolicyResult {
 
   let sizeMultiplier = 1;
   if (themeExposurePct > 25) sizeMultiplier *= 0.7;
-  if (topConcentrationPct > 35) sizeMultiplier *= 0.6;
+  if (topThemeConcentrationPct > 35) sizeMultiplier *= 0.6;
   if (reviewStatus !== "APPROVED") sizeMultiplier *= 0.8;
   if (reasoning.mlScore != null && Math.abs(reasoning.heuristicScore - reasoning.mlScore) > 0.25 && reasoning.mlScore < reasoning.heuristicScore) {
     sizeMultiplier *= 0.7;

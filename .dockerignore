@@ -1,0 +1,15 @@
+node_modules
+.next
+dump
+audit-dumps
+audit_dumps
+.test-out
+repo-tree.txt
+worker-live-err.log
+worker-live.log
+worker-startup-capture.txt
+worker-startup-log.txt
+worker-stdout.txt
+worker-stderr.txt
+.cursor
+

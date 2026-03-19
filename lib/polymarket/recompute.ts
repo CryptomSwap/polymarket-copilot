@@ -6,6 +6,7 @@
 import { prisma } from "@/lib/db";
 import { getStoredCredentials } from "./auth";
 import { computeBehaviorFlags } from "./behavior";
+import { markFunderPolicyRefreshNeeded } from "@/lib/policy-refresh-queue";
 import { computeSnapshot, persistSnapshot } from "./analytics";
 import { derivePositionsFromFills, type DerivedPositionRow, type ResolutionDiagnostics } from "./portfolio";
 import { traceResolutionForAssetIds, type PositionResolutionTrace } from "@/lib/portfolio/resolution-diagnostics";
@@ -51,7 +52,7 @@ function derivedPositionCreateData(funderAddress: string, row: DerivedPositionRo
  * Resolve funder address: from stored credentials or from connected wallet.
  */
 export async function getFunderForRecompute(): Promise<string | null> {
-  const creds = await getStoredCredentials();
+  const { credential: creds } = await getStoredCredentials();
   if (creds?.funderAddress) return creds.funderAddress.toLowerCase();
   const wallet = await prisma.connectedWallet.findFirst({ orderBy: { updatedAt: "desc" } });
   return wallet?.funderAddress?.toLowerCase() ?? null;
@@ -160,12 +161,19 @@ export async function recomputePortfolio(funderAddress?: string): Promise<Recomp
           marketTitle: f.marketTitle,
           description: f.description,
           metadata: f.metadata ? (JSON.parse(JSON.stringify(f.metadata)) as object) : undefined,
+          sourceScope: f.sourceScope,
         },
       });
       flagsWritten++;
     } catch (e) {
       errors.push(e instanceof Error ? e.message : `BehaviorFlag create failed for ${f.type}`);
     }
+  }
+
+  try {
+    await markFunderPolicyRefreshNeeded(resolved);
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : "markFunderPolicyRefreshNeeded failed");
   }
 
   return {

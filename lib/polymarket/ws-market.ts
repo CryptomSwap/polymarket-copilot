@@ -9,7 +9,7 @@
 import { updateWsStatus } from "@/lib/live/status";
 import { handleMarketFeedMessage } from "@/lib/live/handlers";
 import type { StreamConnectionState } from "@/lib/runtime/stream-connection-state";
-import { createInitialStreamConnectionState } from "@/lib/runtime/stream-connection-state";
+import { createInitialStreamConnectionState, cloneStreamConnectionState } from "@/lib/runtime/stream-connection-state";
 
 export type MarketWsMessage = {
   type?: string;
@@ -25,6 +25,25 @@ const DEFAULT_MAX_DELAY_MS = 30000;
 const DEFAULT_MAX_RETRIES = 10;
 const HEARTBEAT_INTERVAL_MS = 10000;
 const MARKET_FEED_FUNDER = "system";
+const SUBSCRIPTION_CHURN_WINDOW_MS = 300_000; // 5 min
+const SUBSCRIPTION_CHURN_THRESHOLD = 8; // times in window => churn
+
+/** Subscription coverage: desired vs actually subscribed, pending ops, last refresh/sync. */
+export interface MarketSubscriptionCoverage {
+  desiredTrackedAssetIds: string[];
+  currentlySubscribedAssetIds: string[];
+  pendingSubscribeIds: string[];
+  pendingUnsubscribeIds: string[];
+  lastSubscriptionRefreshAt: string | null;
+  lastSuccessfulSubscriptionSyncAt: string | null;
+  /** Desired but not in currentlySubscribed (missing coverage). */
+  desiredNotSubscribed: string[];
+  /** Currently subscribed but not desired (stale). */
+  subscribedButNotDesired: string[];
+  inSync: boolean;
+  /** Number of subscription changes (setTracked / initial) in the churn window. */
+  subscriptionChurnCount: number;
+}
 
 /**
  * Create market WebSocket. Reconnect with exponential backoff; persist status and events.
@@ -40,6 +59,8 @@ export function createMarketWs(
   onMessage: (handler: (msg: MarketWsMessage) => void) => void;
   close: () => void;
   connect: () => Promise<void>;
+  getConnectionState: () => StreamConnectionState;
+  getSubscriptionCoverage: () => MarketSubscriptionCoverage;
 } {
   const funder = opts?.funderAddress ?? MARKET_FEED_FUNDER;
   let trackedAssetIds = Array.from(new Set(initialAssetIds));
@@ -48,15 +69,26 @@ export function createMarketWs(
   let retryCount = 0;
   let closed = false;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  const subscribedIds = new Set<string>();
+  let lastSubscriptionRefreshAt: Date | null = null;
+  let lastSuccessfulSubscriptionSyncAt: Date | null = null;
+  const subscriptionChangeTimestamps: number[] = [];
 
   const connectionState: StreamConnectionState = createInitialStreamConnectionState();
   function getConnectionState(): StreamConnectionState {
-    return {
-      ...connectionState,
-      lastOpenAt: connectionState.lastOpenAt ? new Date(connectionState.lastOpenAt.getTime()) : null,
-      lastMessageAt: connectionState.lastMessageAt ? new Date(connectionState.lastMessageAt.getTime()) : null,
-      lastErrorAt: connectionState.lastErrorAt ? new Date(connectionState.lastErrorAt.getTime()) : null,
-    };
+    return cloneStreamConnectionState(connectionState);
+  }
+
+  function markRealDataEvent(type: string): void {
+    const now = new Date();
+    connectionState.lastDataEventAt = now;
+    connectionState.lastMessageAt = now;
+    connectionState.lastSocketFrameAt = now;
+    if (type === "book") connectionState.lastBookEventAt = now;
+    if (type === "last_trade_price" || type === "trade") connectionState.lastTradeEventAt = now;
+    if (type === "best_bid_ask" || type === "price_change") {
+      // quote/depth only; lastDataEventAt already set
+    }
   }
 
   function getBackoffDelay(): number {
@@ -82,6 +114,15 @@ export function createMarketWs(
     }
   }
 
+  function recordSubscriptionChange(): void {
+    const now = Date.now();
+    subscriptionChangeTimestamps.push(now);
+    const cutoff = now - SUBSCRIPTION_CHURN_WINDOW_MS;
+    while (subscriptionChangeTimestamps.length > 0 && subscriptionChangeTimestamps[0] < cutoff) {
+      subscriptionChangeTimestamps.shift();
+    }
+  }
+
   function sendInitialSubscription(): void {
     if (trackedAssetIds.length === 0) return;
     send({
@@ -89,18 +130,55 @@ export function createMarketWs(
       type: "market",
       custom_feature_enabled: true,
     });
+    subscribedIds.clear();
+    for (const id of trackedAssetIds) subscribedIds.add(id);
+    lastSuccessfulSubscriptionSyncAt = new Date();
+    recordSubscriptionChange();
   }
 
   function sendSubscribe(ids: string[]): void {
     const filtered = ids.filter((id) => id.trim().length > 0);
     if (filtered.length === 0) return;
-    send({ assets_ids: filtered, operation: "subscribe" });
+    if (ws?.readyState === 1) {
+      send({ assets_ids: filtered, operation: "subscribe" });
+      for (const id of filtered) subscribedIds.add(id);
+      recordSubscriptionChange();
+    }
   }
 
   function sendUnsubscribe(ids: string[]): void {
     const filtered = ids.filter((id) => id.trim().length > 0);
     if (filtered.length === 0) return;
-    send({ assets_ids: filtered, operation: "unsubscribe" });
+    if (ws?.readyState === 1) {
+      send({ assets_ids: filtered, operation: "unsubscribe" });
+      for (const id of filtered) subscribedIds.delete(id);
+      recordSubscriptionChange();
+    }
+  }
+
+  function getSubscriptionCoverage(): MarketSubscriptionCoverage {
+    const desired = [...trackedAssetIds];
+    const desiredSet = new Set(desired);
+    const current = Array.from(subscribedIds);
+    const currentSet = new Set(current);
+    const desiredNotSubscribed = desired.filter((id) => !currentSet.has(id));
+    const subscribedButNotDesired = current.filter((id) => !desiredSet.has(id));
+    const now = Date.now();
+    const cutoff = now - SUBSCRIPTION_CHURN_WINDOW_MS;
+    const churnCount = subscriptionChangeTimestamps.filter((t) => t >= cutoff).length;
+    const inSync = desiredNotSubscribed.length === 0 && subscribedButNotDesired.length === 0;
+    return {
+      desiredTrackedAssetIds: desired,
+      currentlySubscribedAssetIds: current,
+      pendingSubscribeIds: desiredNotSubscribed,
+      pendingUnsubscribeIds: subscribedButNotDesired,
+      lastSubscriptionRefreshAt: lastSubscriptionRefreshAt?.toISOString() ?? null,
+      lastSuccessfulSubscriptionSyncAt: lastSuccessfulSubscriptionSyncAt?.toISOString() ?? null,
+      desiredNotSubscribed,
+      subscribedButNotDesired,
+      inSync,
+      subscriptionChurnCount: churnCount,
+    };
   }
 
   async function connect(): Promise<void> {
@@ -131,34 +209,43 @@ export function createMarketWs(
         retryCount = 0;
         clearHeartbeat();
         connectionState.status = "open";
-        connectionState.lastOpenAt = new Date();
-        connectionState.lastMessageAt = new Date();
+        const now = new Date();
+        connectionState.lastOpenAt = now;
+        connectionState.lastMessageAt = now;
+        connectionState.lastSocketFrameAt = now;
         connectionState.lastErrorAt = null;
         connectionState.lastError = null;
         void updateWsStatus(funder, "market-feed", { connected: true, lastError: null });
         sendInitialSubscription();
         heartbeatTimer = setInterval(() => {
           send("PING");
-          connectionState.lastMessageAt = new Date();
+          connectionState.lastHeartbeatAt = new Date();
           void updateWsStatus(funder, "market-feed", {
             connected: true,
-            lastHeartbeatAt: new Date(),
-            lastMessageAt: new Date(),
+            lastHeartbeatAt: connectionState.lastHeartbeatAt ?? undefined,
           });
         }, HEARTBEAT_INTERVAL_MS);
         resolve();
       };
 
       ws.onmessage = (event) => {
-        connectionState.lastMessageAt = new Date();
+        const now = new Date();
+        connectionState.lastMessageAt = now;
+        connectionState.lastSocketFrameAt = now;
         try {
           const raw = event.data;
           if (raw === "PONG" || (typeof raw === "string" && raw.trim() === "PONG")) {
-            void updateWsStatus(funder, "market-feed", { connected: true, lastMessageAt: new Date() });
+            connectionState.lastHeartbeatAt = now;
+            void updateWsStatus(funder, "market-feed", { connected: true, lastHeartbeatAt: now });
             return;
           }
           const data = typeof raw === "string" ? JSON.parse(raw) : raw;
-          if (messageHandler) messageHandler(data as MarketWsMessage);
+          const msg = data as MarketWsMessage;
+          const eventType = (msg.event_type ?? msg.type ?? "").toString().toLowerCase();
+          if (eventType && eventType !== "pong" && eventType !== "subscribed") {
+            markRealDataEvent(eventType === "book" ? "book" : eventType === "last_trade_price" ? "last_trade_price" : eventType === "trade" ? "trade" : eventType);
+          }
+          if (messageHandler) messageHandler(msg);
           void handleMarketFeedMessage(funder, data);
         } catch {
           /* ignore parse errors */
@@ -186,6 +273,7 @@ export function createMarketWs(
   }
 
   function setTrackedAssetIds(assetIds: string[]): void {
+    lastSubscriptionRefreshAt = new Date();
     const next = Array.from(new Set(assetIds));
     const prevSet = new Set(trackedAssetIds);
     const nextSet = new Set(next);
@@ -195,11 +283,13 @@ export function createMarketWs(
     if (ws?.readyState === 1) {
       if (toRemove.length > 0) sendUnsubscribe(toRemove);
       if (toAdd.length > 0) sendSubscribe(toAdd);
+      lastSuccessfulSubscriptionSyncAt = new Date();
     }
   }
 
   return {
     setTrackedAssetIds,
+    getSubscriptionCoverage,
     subscribe(ids: string[]) {
       const added = ids.filter((id) => !trackedAssetIds.includes(id));
       if (added.length === 0) return;

@@ -12,7 +12,7 @@ Code-grounded audit of what Polymarket-related data we fetch, store, normalize, 
 |--------|--------|---------|
 | **Markets** | Gamma API (`gamma-api.polymarket.com`) | Market sync → `SyncedMarket` + `SyncedAsset` |
 | **Assets / tokens** | Gamma (per-market `clobTokenIds`, `outcomes`) | Stored as `SyncedAsset` (tokenId, outcome, outcomeIndex) |
-| **Open orders** | CLOB L2 (`clob.polymarket.com` GET `/data/orders`) | User sync → `UserOrder` |
+| **Open orders** | CLOB L2 (`clob.polymarket.com` GET `/orders`) | User sync → `UserOrder` |
 | **Trades (fills)** | CLOB L2 GET `/data/trades` | User sync → `UserFill` |
 | **Positions** | Not fetched directly | Reconstructed from fills in user-sync (`UserPosition`) and from fills again in portfolio engine (`DerivedPosition`) |
 | **User connection / auth** | Stored credentials (`PolymarketApiCredential`), `ConnectedWallet` | `getStoredCredentials()`, `getFunderForRecompute()` |
@@ -26,7 +26,7 @@ We do **not** call a dedicated “positions” endpoint; positions are derived f
 | Flow | Endpoint / source | Code |
 |------|-------------------|------|
 | **Market sync** | `GET https://gamma-api.polymarket.com/markets?limit=&offset=&active=true&closed=false` | `lib/polymarket/markets.ts` – `fetchGammaMarketsPageRaw` |
-| **Orders sync** | `GET https://clob.polymarket.com/data/orders` (L2 auth, `next_cursor=MA==`) | `lib/polymarket/l2-readonly.ts` – `fetchOpenOrdersL2` |
+| **Orders sync** | `GET https://clob.polymarket.com/orders` (L2 auth) | `lib/polymarket/l2-readonly.ts` – `fetchOpenOrdersL2` |
 | **Fills sync** | `GET https://clob.polymarket.com/data/trades` (L2 auth, `next_cursor=MA==`) | `lib/polymarket/l2-readonly.ts` – `fetchTradesL2` |
 | **Credential validation** | `GET https://clob.polymarket.com/auth/api-keys` (L2 auth) | `lib/polymarket/l2-readonly.ts` – `validateCredentialsWithClob` |
 
@@ -137,7 +137,7 @@ Other tables (PortfolioSnapshot, BehaviorFlag, MarketPriceSnapshot, MarketSignal
 ## 4. Fields exposed to API / UI
 
 - **GET /api/portfolio/overview**  
-  Latest `PortfolioSnapshot`: totalOpenExposure, totalReservedExposure, realizedPnl, unrealizedPnl, openPositionsCount, openOrdersCount, topConcentrationPct, yesExposure, noExposure, createdAt.
+  Latest `PortfolioSnapshot`: totalOpenExposure, totalReservedExposure, realizedPnl, unrealizedPnl, openPositionsCount, openOrdersCount, topThemeConcentrationPct, topMarketConcentrationPct, yesExposure, noExposure, createdAt.
 
 - **GET /api/portfolio/positions**  
   `DerivedPosition` rows with enrichment: marketId, marketTitle, marketSlug, category, theme, endDate (from SyncedMarket), decision snapshot, diagnostics (matchedByMarketId / conditionId / assetId, unresolved count).

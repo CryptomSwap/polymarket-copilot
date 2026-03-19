@@ -29,6 +29,7 @@ import {
 import {
   DEFAULT_HEALTH_CONFIG,
   isStale,
+  isDegraded,
   isRecovered,
   type HealthConfig,
 } from "./market-state-health";
@@ -317,11 +318,15 @@ export class MarketStateEngine {
     for (const asset of this.store.getAssets()) {
       const lastEventAt = asset.health.lastMarketEventAt ?? lastUpdateForAsset(asset);
       const wasStale = asset.health.isStale;
+      const wasDegraded = asset.health.isDegraded;
       const nowStale = isStale(lastEventAt, now, this.healthConfig);
-      if (nowStale !== wasStale) {
+      const nowDegraded = isDegraded(lastEventAt, now, this.healthConfig);
+      // Update both stale and degraded flags; degraded is a "soft warning" and should clear when the
+      // asset recovers (i.e. lastMarketEventAt becomes recent again), rather than latching forever.
+      if (nowStale !== wasStale || nowDegraded !== wasDegraded) {
         const healthPatch = {
           isStale: nowStale,
-          isDegraded: nowStale ? true : asset.health.isDegraded,
+          isDegraded: nowDegraded,
         };
         this.store.patchAsset(asset.assetId, { health: healthPatch });
         const updated = this.store.getAsset(asset.assetId);
@@ -365,9 +370,10 @@ export class MarketStateEngine {
   private buildHealthPatch(prev: AssetLiveState, now: Date): Partial<AssetLiveState["health"]> {
     const lastEventAt = now;
     const stale = isStale(lastEventAt, now, this.healthConfig);
+    const degraded = isDegraded(lastEventAt, now, this.healthConfig);
     return {
       isStale: stale,
-      isDegraded: stale || prev.health.isDegraded,
+      isDegraded: degraded,
       lastMarketEventAt: lastEventAt,
     };
   }

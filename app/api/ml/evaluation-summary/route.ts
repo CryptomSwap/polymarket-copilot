@@ -41,7 +41,7 @@ export async function GET() {
         if (Array.isArray(parsed.coefficients)) {
           const names = [
             "marketPrice", "fairPrice", "edge", "confidence", "momentumComponent", "liquidityComponent",
-            "portfolioComponent", "behaviorComponent", "themeExposurePct", "topConcentrationPct",
+            "portfolioComponent", "behaviorComponent", "themeExposurePct", "topThemeConcentrationPct",
             "hasExistingPosition", "linkedNewsCount", "newsFreshnessScore", "newsCredibilityScore",
             "noveltyScore", "saturationScore", "catalystBoost", "signalTypeEnc", "actionEnc", "reviewStatusEnc",
             "priorityScore",

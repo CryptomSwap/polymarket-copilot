@@ -84,9 +84,29 @@ export async function GET() {
         userWsConnected: streams.userWsConnected,
         marketConnection: streams.marketConnection ?? null,
         userConnection: streams.userConnection ?? null,
+        socketOpen: streams.socketOpen ?? (streams.marketConnection?.status === "open" && streams.userConnection?.status === "open"),
+        heartbeatHealthy: streams.heartbeatHealthy ?? null,
+        dataFlowHealthy: streams.dataFlowHealthy ?? null,
         operationalReadiness: streams.operationalReadiness ?? false,
         trackedAssetCount: streams.trackedAssetCount ?? 0,
+        marketLastDataEventAt: streams.marketLastDataEventAt ?? null,
+        userLastDataEventAt: streams.userLastDataEventAt ?? null,
+        marketLastHeartbeatAt: streams.marketLastHeartbeatAt ?? null,
+        userLastHeartbeatAt: streams.userLastHeartbeatAt ?? null,
       },
+      watchdogReasons: (runtimeHealth.watchdogReasons as string[] | undefined) ?? [],
+      watchdogState: (runtimeHealth.watchdogState as "ok" | "degraded" | "kill_switch" | undefined) ?? "ok",
+      reconciliation: runtimeHealth.reconciliation ?? null,
+      operatorHealth: runtimeHealth.operatorHealth ?? null,
+      marketSubscriptionCoverage: runtimeHealth.marketSubscriptionCoverage ?? null,
+      operatingMode: runtimeHealth.operatingMode ?? null,
+      operatingModeSource: runtimeHealth.operatingModeSource ?? null,
+      /** Exchange-truth authority: freshness and source. */
+      truthModelStatus: runtimeHealth.truthModelStatus ?? null,
+      /** Execution failure containment: frozen assets and ambiguity. */
+      executionContainment: (runtimeHealth.operatorHealth as Record<string, unknown> | null)?.executionContainment ?? null,
+      /** Latency and data-integrity monitoring. */
+      latencyAndIntegrity: runtimeHealth.latencyAndIntegrity ?? null,
     };
 
     return NextResponse.json(snapshot);

@@ -72,12 +72,14 @@ Centralize and extend alerts beyond current **DriftAlert** (order/position sync 
 | `app/(dashboard)/ops/page.tsx` | Include engine alerts in list |
 | Optional: `components/dashboard/header.tsx` or dashboard home | Alert count + link |
 
-### Acceptance criteria (Phase 1)
+### Acceptance criteria (Phase 1) — Implemented
 
-- [ ] Alert Engine returns a list of alert items (drift + portfolio-intelligence–based) for a funder.
-- [ ] GET /api/alerts/feed returns merged alerts (drift + engine); existing /api/live/alerts still works.
-- [ ] Portfolio and Ops pages show both drift and engine alerts with clear labels (e.g. “Sync”, “Concentration”).
-- [ ] All rules in the engine are documented (e.g. in code comments or a short doc).
+- [x] Alert Engine returns a list of alert items (drift + portfolio-intelligence–based) for a funder.
+- [x] GET /api/alerts/feed returns merged alerts (drift + engine); existing /api/live/alerts still works.
+- [x] Portfolio and Ops pages show both drift and engine alerts with clear labels (e.g. “Sync”, “Portfolio”).
+- [x] All rules in the engine are documented (e.g. in code comments or a short doc).
+
+**Implementation:** `lib/alerts/types.ts` (feed types), `lib/alerts/engine.ts` (`getAlertFeed()`), `app/api/alerts/feed/route.ts` (GET feed). Engine alerts are computed from portfolio intelligence flags (HIGH_CONCENTRATION, NEAR_RESOLUTION_CLUSTER, STALE_SYNC_CLUSTER, UNRESOLVED_CATALOG_POSITIONS, LARGE_LOSS, LARGE_GAIN); no new DB tables. Regression: `lib/alerts/__tests__/feed.test.ts` (invoked from portfolio-api-regression-tests).
 
 ---
 
@@ -118,7 +120,8 @@ Surface **why** a recommendation got its action and primaryActionType (rationale
 
 | File | Purpose |
 |------|--------|
-| `lib/polymarket/recommendation-explainability.ts` | Build explanation blocks + summary from RecommendationRowV2 + context |
+| `lib/recommendations/explainability.ts` | **Implemented.** Build normalized explanation (summary, drivers, penalties, sizing, quality, review) from persisted rec + signal + evaluation + review. No new tables; read-only. |
+| `app/api/recommendations/[id]/explain/route.ts` | **Implemented.** GET returns full explanation payload; 404 if recommendation not found. |
 
 ### Files to change
 
@@ -130,9 +133,9 @@ Surface **why** a recommendation got its action and primaryActionType (rationale
 
 ### Acceptance criteria (Phase 2)
 
-- [ ] Explanation blocks (edge, concentration, timing, liquidity) are computed deterministically from rec + context.
-- [ ] Recommendation detail page shows “Why this action” with blocks and existing v2 fields.
-- [ ] API returns explanation (either in [id] with `?explain=1` or via /explain).
+- [x] Explanation blocks (edge, concentration, timing, liquidity) are computed deterministically from rec + context (via `buildRecommendationExplanation` in `lib/recommendations/explainability.ts`).
+- [x] Recommendation detail page shows “Why this action” with blocks and existing v2 fields.
+- [x] API returns explanation via GET /api/recommendations/[id]/explain (read-only; 404 when not found).
 
 ---
 
@@ -144,7 +147,7 @@ Show a **timeline of portfolio state over time** (exposure, PnL, position count,
 
 ### Current state
 
-- **PortfolioSnapshot** exists: totalOpenExposure, totalReservedExposure, realizedPnl, unrealizedPnl, openPositionsCount, openOrdersCount, topConcentrationPct, yesExposure, noExposure, createdAt.  
+- **PortfolioSnapshot** exists: totalOpenExposure, totalReservedExposure, realizedPnl, unrealizedPnl, openPositionsCount, openOrdersCount, topThemeConcentrationPct, topMarketConcentrationPct (DB columns; see concentration naming migration), yesExposure, noExposure, createdAt.  
 - **recompute** writes one snapshot per run via `persistSnapshot` (`lib/polymarket/analytics.ts`).  
 - **GET /api/portfolio/overview** returns the **latest** snapshot only (no history).
 
@@ -158,7 +161,7 @@ Show a **timeline of portfolio state over time** (exposure, PnL, position count,
    - **New: GET /api/portfolio/timeline**  
    - Query: `?funder=...` (or use connected funder), `?from=ISO`, `?to=ISO`, `?limit=100`.  
    - Returns: `{ snapshots: PortfolioSnapshotSummary[], interval?: string }`.  
-   - Each item: at least `createdAt`, `totalOpenExposure`, `unrealizedPnl`, `realizedPnl`, `openPositionsCount`, optionally `topConcentrationPct`, `yesExposure`, `noExposure`.  
+   - Each item: at least `createdAt`, `totalOpenExposure`, `unrealizedPnl`, `realizedPnl`, `openPositionsCount`, optionally `topThemeConcentrationPct`/`topMarketConcentrationPct` (API and DB columns), `yesExposure`, `noExposure`.  
    - Order: `createdAt` desc.  
    - If few snapshots exist, consider “synthetic” points from DerivedPosition history (optional, later): e.g. from UserFill dates; for MVP use only PortfolioSnapshot.
 
@@ -172,8 +175,10 @@ Show a **timeline of portfolio state over time** (exposure, PnL, position count,
 
 | File | Purpose |
 |------|--------|
-| `app/api/portfolio/timeline/route.ts` | GET portfolio snapshots in range |
-| `app/(dashboard)/portfolio/timeline/page.tsx` (or section in portfolio/page) | Timeline chart + table |
+| `lib/portfolio/timeline.ts` | **Implemented.** Normalized timeline from DriftAlert, BehaviorFlag, RecommendationLifecycleEvent, RecommendationExecutionOutcome, OrderReconciliationSnapshot, PostTradeJournalEntry, CopilotAlert. limit/since/source. |
+| `app/api/portfolio/timeline/route.ts` | **Implemented.** GET limit, since, source. Read-only. |
+| `app/(dashboard)/portfolio/timeline/page.tsx` | **Implemented.** Event feed + source filter. |
+| `lib/portfolio/__tests__/timeline.test.ts` | **Implemented.** Shape, sort, filter tests. |
 
 ### Files to change
 
@@ -184,9 +189,9 @@ Show a **timeline of portfolio state over time** (exposure, PnL, position count,
 
 ### Acceptance criteria (Phase 3)
 
-- [ ] GET /api/portfolio/timeline returns snapshots in range for the funder.
-- [ ] Portfolio timeline view shows exposure and PnL over time (chart or table).
-- [ ] No new DB tables; uses existing PortfolioSnapshot.
+- [x] GET /api/portfolio/timeline returns event feed for funder (limit, since, source).
+- [x] Portfolio timeline view shows chronological event feed with source filter.
+- [x] No new DB tables; uses existing persistence (DriftAlert, BehaviorFlag, etc.).
 
 ---
 
@@ -233,30 +238,28 @@ Let users attach a **thesis** (and optionally invalidation conditions) to a **po
 
 | File | Purpose |
 |------|--------|
-| `lib/portfolio/position-thesis.ts` | get/upsert/delete thesis by funder + assetId |
-| `app/api/portfolio/position-thesis/route.ts` | GET (list or by assetId) + POST/PUT upsert |
-| Optional: `app/api/positions/[assetId]/thesis/route.ts` | GET one thesis |
+| `lib/portfolio/position-thesis.ts` | **Exists.** get/upsert by funder + assetId; **added** getPositionThesisForApi (stable empty shape + position context). |
+| `app/api/portfolio/position-thesis/route.ts` | GET (list or by assetId) + PUT upsert (existing). |
+| `app/api/portfolio/positions/[assetId]/thesis/route.ts` | **Implemented.** GET one thesis (404 if no position); PUT upsert (validated, ownership enforced). |
+| `lib/portfolio/__tests__/position-thesis.test.ts` | **Implemented.** get/upsert, validation, ownership tests. |
 
 ### Files to change
 
 | File | Change |
 |------|--------|
-| `prisma/schema.prisma` | Add PositionThesis model |
-| `app/api/portfolio/positions/route.ts` | Include thesis in position payload when available |
-| `app/(dashboard)/portfolio/page.tsx` | Position detail: thesis + invalidation, edit form |
-| `app/(dashboard)/recommendations/[id]/page.tsx` | Show position thesis when relatedPosition exists |
-| Optional: `app/(dashboard)/markets/[slug]/page.tsx` | Show position thesis for held position |
+| `app/(dashboard)/portfolio/page.tsx` | **Done.** Thesis panel uses PUT /api/portfolio/positions/[assetId]/thesis; persistence feedback. |
+| `app/api/portfolio/positions/route.ts` | Already includes thesis in position payload. |
 
 ### Acceptance criteria (Phase 4)
 
-- [ ] PositionThesis (or agreed alternative) is stored per (funder, assetId).
-- [ ] User can set/edit thesis and invalidation for a position from the portfolio UI.
-- [ ] Portfolio and recommendation UIs show the stored thesis where relevant.
-- [ ] API allows read and write of position thesis.
+- [x] PositionThesis is stored per (funder, assetId).
+- [x] User can set/edit thesis (entry, status, exit reason, notes) from the portfolio UI.
+- [x] Portfolio position detail shows stored thesis; recommendation UI can show via existing positions payload.
+- [x] API allows read (GET positions/[assetId]/thesis) and write (PUT positions/[assetId]/thesis); validated, no cross-user access.
 
 ---
 
-## Phase 5: Recommendation summary strip
+## Phase 5: Dashboard summary strip (+ optional Recommendation strip)
 
 ### Objective
 
@@ -285,25 +288,27 @@ A compact **summary strip** (dashboard and/or recommendations page) that shows: 
    - No new tables. Use existing Recommendation + primaryActionType.  
    - Optional: add a small function in `lib/polymarket/recommendations.ts` or in the route to compute summary from DB.
 
-### Files to add
+### Implemented: Dashboard summary strip
 
 | File | Purpose |
 |------|--------|
-| `app/api/recommendations/summary/route.ts` | GET counts by primaryActionType + sample rationales |
-| `components/dashboard/recommendation-summary-strip.tsx` | Strip UI component |
+| `lib/dashboard/summary-strip.ts` | getDashboardSummaryStrip(): aggregate from intelligence, open orders, alert feed |
+| `app/api/dashboard/summary-strip/route.ts` | GET compact payload; read-only |
+| `components/dashboard/summary-strip.tsx` | Strip UI (positions, orders, %, unresolved, alerts, freshness, refresh) |
+| `lib/dashboard/__tests__/summary-strip.test.ts` | Payload shape, aggregation, mixed-time |
 
-### Files to change
+Dashboard page renders SummaryStrip below title; Alerts section has id="alerts" for strip link.
 
-| File | Change |
-|------|--------|
-| `app/(dashboard)/page.tsx` | Render RecommendationSummaryStrip |
-| Optional: `app/(dashboard)/recommendations/page.tsx` | Strip at top of list |
+### Acceptance criteria (Phase 5 dashboard strip)
 
-### Acceptance criteria (Phase 5)
+- [x] GET /api/dashboard/summary-strip returns compact portfolio-state payload.
+- [x] Dashboard shows summary strip near top; mixed-time surfaced in payload and UI.
+- [x] Strip is deterministic; no new tables; uses existing services.
 
-- [ ] GET /api/recommendations/summary returns byPrimaryAction and sample rationales.
-- [ ] Dashboard shows the recommendation summary strip with link to full list.
-- [ ] Strip is deterministic (same data → same summary).
+### Optional (not yet implemented): Recommendation summary strip
+
+- GET /api/recommendations/summary (byPrimaryAction + sample rationales).
+- components/dashboard/recommendation-summary-strip.tsx.
 
 ---
 
@@ -360,12 +365,19 @@ A compact **summary strip** (dashboard and/or recommendations page) that shows: 
 | `prisma/schema.prisma` | Optional: TradingPolicyConfig or key-value for policy |
 | `app/(dashboard)/ops/page.tsx` or settings | Show policy config + link to guardrails |
 
+### Implemented: Bot-prep guardrails (read-only preflight)
+
+- **lib/bot/guardrails.ts**: Added `getGuardrailsReadiness(funder)` — deterministic preflight summary from existing signals. Returns `ready`, `status` ("ready" | "caution" | "blocked"), `checks[]`, `asOf`, `notes`.
+- **GET /api/bot/guardrails**: Read-only; returns preflight payload. No mutation; no new tables.
+- **Checks**: Portfolio truth-model readiness, portfolio freshness, unresolved positions, high concentration (warn 35%+, block 55%+), stale sync, high-severity alerts, reconciliation mismatch, recommendation review readiness. Blocking vs caution: any `blocking: true` → status blocked; else any warn → caution; else ready.
+- **UI**: **components/bot/guardrails-card.tsx** on Ops page; status (Ready / Caution / Blocked) and per-check list.
+- **Tests**: lib/bot/__tests__/guardrails-readiness.test.ts; `npm run test:guardrails`.
+
 ### Acceptance criteria (Phase 6)
 
-- [ ] Policy config is readable via API; no trading code executes orders.
-- [ ] Guardrails function returns allow/deny + reason; documented.
-- [ ] TRADING_GUARDRAILS.md states dry-run and no autonomous execution.
-- [ ] Ops or settings shows policy and readiness (optional).
+- [x] Bot-readiness preflight: GET /api/bot/guardrails returns deterministic summary; no trading.
+- [x] Guardrails: checkGuardrails (per-candidate) and getGuardrailsReadiness (system preflight) in lib/bot/guardrails.ts.
+- [x] Ops page shows Bot readiness card with ready/caution/blocked and checks.
 
 ---
 

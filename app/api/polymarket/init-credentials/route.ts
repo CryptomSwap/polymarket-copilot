@@ -5,14 +5,23 @@ import { encrypt } from "@/lib/crypto";
 import { createOrDeriveApiKeyWithL1Headers } from "@/lib/polymarket/l1-auth";
 import { initCredentialsPayloadSchema } from "@/lib/polymarket/connection-schema";
 import { validateCredentialEncryptionConfig } from "@/lib/polymarket/credentials-env";
-import { validateCredentialsWithClob } from "@/lib/polymarket/l2-readonly";
-import { clearCredentialsForConnection } from "@/lib/polymarket/auth";
+import { validateCredentialsWithClobAuthoritative } from "@/lib/polymarket/l2-readonly";
+import {
+  clearCredentialsForConnection,
+  invalidateCredentialLookupCache,
+} from "@/lib/polymarket/auth";
 
 /**
  * POST /api/polymarket/init-credentials
  * MetaMask-based L1 auth: accepts client-signed L1 payload, calls Polymarket create/derive API key,
  * stores apiKey + encrypted secret/passphrase. No POLYMARKET_SIGNER_PRIVATE_KEY required.
  * Never returns secret or passphrase.
+ *
+ * Identity model (single consistent identity for create, validate, and store):
+ * - Signer: client signs with EOA (polygonAddress). We send POLY_ADDRESS = eoaNorm to derive/create.
+ * - polyAddress: EOA (eoaNorm) — used in L2 POLY_ADDRESS header; stored on credential row.
+ * - funderAddress: from request (funderNorm); stored and used in L2 creds.
+ * - We validate with the exact same l2Creds (apiKey, secret, passphrase, funderAddress, polyAddress) we then store.
  * TODO: For server-side authenticated trading, use getStoredCredentials() + signer when needed.
  */
 export async function POST(request: NextRequest) {
@@ -89,50 +98,74 @@ export async function POST(request: NextRequest) {
 
     const oldCredsRemoved = await clearCredentialsForConnection(connection.id);
 
-    const validation = await validateCredentialsWithClob(
-      {
-        apiKey: credentials.apiKey,
-        secret: credentials.secret,
-        passphrase: credentials.passphrase,
-        funderAddress: funderNorm,
-        polyAddress: eoaNorm,
-      },
-      signatureType
-    );
+    // Validate with the exact same identity we will store: polyAddress = EOA that derived the key, funder = request funder.
+    const l2Creds = {
+      apiKey: credentials.apiKey,
+      secret: credentials.secret,
+      passphrase: credentials.passphrase,
+      funderAddress: funderNorm,
+      polyAddress: eoaNorm,
+    };
+    const validation = await validateCredentialsWithClobAuthoritative(l2Creds);
 
     const diagnostics = {
-      eoaAddressUsed: eoaNorm,
-      funderAddressUsed: funderNorm,
-      signatureTypeUsed: signatureType,
-      polyAddressUsed: eoaNorm,
+      connectedWalletEoa: connection.eoaAddress.toLowerCase(),
+      funderAddress: funderNorm,
+      storedPolyAddress: eoaNorm,
+      signatureType,
+      createOrDeriveSucceeded: true,
+      validationMethodUsed: "authoritative_multi_endpoint",
+      apiKeysOk: validation.apiKeysOk,
+      tradesOk: validation.tradesOk,
+      dataOrdersOk: validation.dataOrdersOk,
+      strongAuthOk: validation.strongAuthOk,
+      overallOk: validation.overallOk,
+      apiKeysStatus: validation.diagnostics.apiKeysStatus,
+      tradesStatus: validation.diagnostics.tradesStatus,
+      dataOrdersStatus: validation.diagnostics.dataOrdersStatus,
+      apiKeysRequestPath: validation.diagnostics.apiKeysRequestPath,
+      tradesRequestPath: validation.diagnostics.tradesRequestPath,
+      dataOrdersRequestPath: validation.diagnostics.dataOrdersRequestPath,
+      apiKeysBodySnippet: validation.diagnostics.apiKeysBodySnippet ?? null,
+      tradesBodySnippet: validation.diagnostics.tradesBodySnippet ?? null,
+      dataOrdersBodySnippet: validation.diagnostics.dataOrdersBodySnippet ?? null,
       oldCredsRemoved: oldCredsRemoved > 0,
-      validationMethodUsed: validation.ok ? validation.validationMethodUsed : validation.diagnostics?.validationMethodUsed ?? null,
-      httpStatus: validation.ok ? 200 : (validation.diagnostics?.httpStatus ?? null),
-      errorBody: validation.ok ? undefined : (validation.diagnostics?.errorBody ?? undefined),
+      ordersWarning:
+        validation.strongAuthOk && !validation.dataOrdersOk ? "data_orders_failed" : null,
     };
 
-    if (!validation.ok) {
-      const errorTitle =
-        validation.code === "credentials_invalid"
-          ? "Credentials invalid"
-          : validation.code === "validation_request_malformed"
-            ? "Validation request malformed"
-            : validation.code === "clob_unavailable"
-              ? "CLOB unavailable"
-              : "Unexpected validation response";
+    if (!validation.strongAuthOk) {
+      console.warn("[init-credentials] Validation failed (no secrets)", {
+        connectedWalletEoa: diagnostics.connectedWalletEoa,
+        funderAddress: diagnostics.funderAddress,
+        storedPolyAddress: diagnostics.storedPolyAddress,
+        signatureType: diagnostics.signatureType,
+        apiKeysStatus: diagnostics.apiKeysStatus,
+        tradesStatus: diagnostics.tradesStatus,
+        dataOrdersStatus: diagnostics.dataOrdersStatus,
+        apiKeysRequestPath: diagnostics.apiKeysRequestPath,
+        tradesRequestPath: diagnostics.tradesRequestPath,
+        dataOrdersRequestPath: diagnostics.dataOrdersRequestPath,
+        dataOrdersBodySnippet: diagnostics.dataOrdersBodySnippet,
+        tradesBodySnippet: diagnostics.tradesBodySnippet,
+      });
+      const code =
+        validation.diagnostics.dataOrdersStatus === 401 ||
+        validation.diagnostics.tradesStatus === 401 ||
+        validation.diagnostics.apiKeysStatus === 401
+          ? "credentials_invalid"
+          : validation.diagnostics.dataOrdersStatus >= 500 ||
+              validation.diagnostics.tradesStatus >= 500 ||
+              validation.diagnostics.apiKeysStatus >= 500
+            ? "clob_unavailable"
+            : "credentials_invalid";
       return NextResponse.json(
         {
-          error: errorTitle,
-          details: validation.error,
-          code: validation.code,
-          hint:
-            validation.code === "credentials_invalid"
-              ? "Clear credentials and re-initialize; ensure the connected wallet matches Polymarket."
-              : validation.code === "validation_request_malformed"
-                ? "Validator bug or wrong endpoint; not a credential rejection."
-                : validation.code === "clob_unavailable"
-                  ? "Retry later."
-                  : "Check CLOB connectivity or try again.",
+          error:
+            "Credentials rejected on one or more real endpoints (api-keys, trades, or orders). Re-initialize after fixing account/key.",
+          details: `apiKeys: ${validation.diagnostics.apiKeysStatus}, trades: ${validation.diagnostics.tradesStatus}, dataOrders: ${validation.diagnostics.dataOrdersStatus}`,
+          code,
+          hint: "Clear credentials and re-initialize; ensure the connected wallet matches Polymarket and the key is valid for all endpoints.",
           diagnostics,
         },
         { status: 502 }
@@ -151,7 +184,11 @@ export async function POST(request: NextRequest) {
         encryptedPassphrase,
         funderAddress: funderNorm,
         signatureType,
+        polyAddress: eoaNorm,
         lastValidatedAt: now,
+        validationApiKeysOk: validation.apiKeysOk,
+        validationTradesOk: validation.tradesOk,
+        validationOrdersOk: validation.dataOrdersOk,
       },
       update: {
         apiKey: credentials.apiKey,
@@ -159,9 +196,15 @@ export async function POST(request: NextRequest) {
         encryptedPassphrase,
         funderAddress: funderNorm,
         signatureType,
+        polyAddress: eoaNorm,
         lastValidatedAt: now,
+        validationApiKeysOk: validation.apiKeysOk,
+        validationTradesOk: validation.tradesOk,
+        validationOrdersOk: validation.dataOrdersOk,
       },
     });
+
+    invalidateCredentialLookupCache();
 
     return NextResponse.json({
       success: true,

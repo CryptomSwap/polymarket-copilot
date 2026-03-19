@@ -1,34 +1,47 @@
 /**
- * Portfolio Timeline v1: build a reverse-chronological feed of events from
- * UserFill, Recommendation, RecommendationLifecycleEvent, CopilotAlert, PortfolioSnapshot.
- * Uses canonical market data (SyncedMarket) where available.
+ * Portfolio Timeline: deterministic, read-only merge of portfolio-related events
+ * into a single chronological feed. No new tables; uses existing persistence only.
+ *
+ * Sources: DriftAlert, BehaviorFlag, RecommendationLifecycleEvent, RecommendationExecutionOutcome,
+ * OrderReconciliationSnapshot, PostTradeJournalEntry, CopilotAlert.
  */
 
 import { prisma } from "@/lib/db";
 
-export type TimelineEventType =
-  | "position_opened"
-  | "position_increased"
-  | "position_reduced"
-  | "recommendation_created"
-  | "recommendation_lifecycle"
-  | "alert_triggered"
-  | "portfolio_snapshot";
+/** Source identifier for filtering. */
+export type TimelineSourceFilter =
+  | "all"
+  | "drift"
+  | "behavior"
+  | "recommendation"
+  | "execution"
+  | "reconciliation"
+  | "journal"
+  | "copilot";
 
-export interface TimelineEvent {
+/** Normalized timeline item for API/UI. One per persisted row; deterministic title/message from stored fields. */
+export interface TimelineItem {
   id: string;
-  type: TimelineEventType;
-  occurredAt: string; // ISO
+  eventType: string;
+  source: Exclude<TimelineSourceFilter, "all">;
   title: string;
   message: string;
-  marketId?: string | null;
-  assetId?: string | null;
-  recommendationId?: string | null;
-  alertId?: string | null;
+  severity: string | null;
+  entityRefs: {
+    recommendationId?: string | null;
+    marketId?: string | null;
+    assetId?: string | null;
+    orderId?: string | null;
+    alertId?: string | null;
+    journalEntryId?: string | null;
+  };
+  createdAt: string;
   metadata?: Record<string, unknown>;
 }
 
-const DEFAULT_LIMIT = 80;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 200;
+
 const LIFECYCLE_LABELS: Record<string, string> = {
   SHOWN: "Recommendation shown",
   REVIEWED: "Recommendation reviewed",
@@ -42,7 +55,7 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   SKIPPED: "Skipped",
 };
 
-const ALERT_TYPE_LABELS: Record<string, string> = {
+const COPILOT_ALERT_TYPE_LABELS: Record<string, string> = {
   CONCENTRATION_BREACH: "Concentration breach",
   NEW_ADD_OPPORTUNITY: "Add opportunity",
   NEAR_RESOLUTION_REVIEW: "Near resolution",
@@ -50,208 +63,260 @@ const ALERT_TYPE_LABELS: Record<string, string> = {
   DATA_HEALTH: "Data health",
 };
 
-function parseNum(s: string | null | undefined): number {
-  if (s == null || s === "") return 0;
-  const n = parseFloat(String(s).trim());
-  return Number.isFinite(n) ? n : 0;
+function inRange(createdAt: Date, since?: Date): boolean {
+  if (!since) return true;
+  return createdAt >= since;
 }
 
 /**
- * Resolve assetIds to market titles via SyncedAsset -> SyncedMarket (canonical).
+ * Fetch and map DriftAlert rows to timeline items.
  */
-async function getMarketTitlesByAssetId(assetIds: string[]): Promise<Record<string, string>> {
-  if (assetIds.length === 0) return {};
-  const unique = [...new Set(assetIds)];
-  const assets = await prisma.syncedAsset.findMany({
-    where: { tokenId: { in: unique } },
-    include: { syncedMarket: { select: { id: true, title: true } } },
-  });
-  const map: Record<string, string> = {};
-  for (const a of assets) {
-    map[a.tokenId] = a.syncedMarket?.title ?? "Unknown market";
-  }
-  for (const id of unique) {
-    if (!map[id]) map[id] = "Unknown market";
-  }
-  return map;
-}
-
-/**
- * Build timeline events for a funder. Reverse chronological.
- */
-export async function getPortfolioTimeline(
-  funderAddress: string,
-  options: { limit?: number; from?: Date; to?: Date } = {}
-): Promise<TimelineEvent[]> {
-  const funder = funderAddress.toLowerCase().trim();
-  const limit = Math.min(options.limit ?? DEFAULT_LIMIT, 200);
-  const from = options.from;
-  const to = options.to;
-
-  const events: TimelineEvent[] = [];
-
-  // --- UserFill: position opened / increased / reduced ---
-  const matchTimeRange =
-    from && to ? { gte: from, lte: to } : from ? { gte: from } : to ? { lte: to } : undefined;
-  const fills = await prisma.userFill.findMany({
-    where: {
-      funderAddress: funder,
-      ...(matchTimeRange && { matchTime: matchTimeRange }),
-    },
-    orderBy: { matchTime: "desc" },
-  });
-
-  const fillsWithTime = fills.filter((f) => f.matchTime != null) as Array<{ matchTime: Date } & (typeof fills)[0]>;
-  const firstFillByAsset = new Map<string, Date>();
-  for (const f of fillsWithTime) {
-    const t = f.matchTime.getTime();
-    const cur = firstFillByAsset.get(f.assetId);
-    if (!cur || t < cur.getTime()) firstFillByAsset.set(f.assetId, f.matchTime);
-  }
-
-  const assetIds = [...new Set(fillsWithTime.map((f) => f.assetId))];
-  const marketTitles = await getMarketTitlesByAssetId(assetIds);
-  const assetsWithMarket = await prisma.syncedAsset.findMany({
-    where: { tokenId: { in: assetIds } },
-    select: { tokenId: true, syncedMarketId: true },
-  });
-  const assetToMarketId: Record<string, string> = {};
-  for (const a of assetsWithMarket) {
-    if (a.syncedMarketId) assetToMarketId[a.tokenId] = a.syncedMarketId;
-  }
-
-  for (const f of fillsWithTime) {
-    const at = f.matchTime;
-    const title = marketTitles[f.assetId] ?? "Unknown market";
-    const firstAt = firstFillByAsset.get(f.assetId);
-    const isFirst = firstAt && firstAt.getTime() === at.getTime();
-    const side = (f.side ?? "").toUpperCase();
-    const size = parseNum(f.size);
-    const price = parseNum(f.price);
-
-    let type: "position_opened" | "position_increased" | "position_reduced";
-    let eventTitle: string;
-    let message: string;
-
-    if (isFirst) {
-      type = "position_opened";
-      eventTitle = "Position opened";
-      message = `${title} · ${side} ${size} @ ${(price * 100).toFixed(1)}¢`;
-    } else if (side === "BUY" || side === "YES" || side === "NO") {
-      type = "position_increased";
-      eventTitle = "Position increased";
-      message = `${title} · +${size} @ ${(price * 100).toFixed(1)}¢`;
-    } else {
-      type = "position_reduced";
-      eventTitle = "Position reduced";
-      message = `${title} · −${size} @ ${(price * 100).toFixed(1)}¢`;
-    }
-
-    events.push({
-      id: `fill-${f.funderAddress}-${f.tradeId}`,
-      type,
-      occurredAt: at.toISOString(),
-      title: eventTitle,
-      message,
-      assetId: f.assetId,
-      marketId: assetToMarketId[f.assetId] ?? null,
-      metadata: { tradeId: f.tradeId, side: f.side, size: f.size, price: f.price },
-    });
-  }
-
-  // --- Recommendation created ---
-  const recs = await prisma.recommendation.findMany({
-    where: { marketSignal: { funderAddress: funder } },
-    include: { marketSignal: true },
+async function getDriftItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.driftAlert.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
     orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
   });
+  return rows.map((r) => ({
+    id: `drift-${r.id}`,
+    eventType: "drift_alert",
+    source: "drift" as const,
+    title: r.alertType.replace(/_/g, " "),
+    message: r.message,
+    severity: r.severity,
+    entityRefs: {
+      marketId: r.marketId ?? null,
+      assetId: r.assetId ?? null,
+      alertId: r.id,
+    },
+    createdAt: r.createdAt.toISOString(),
+    metadata: { polymarketOrderId: r.polymarketOrderId, resolved: r.resolved },
+  }));
+}
 
-  for (const r of recs) {
-    if (from && r.createdAt < from) continue;
-    if (to && r.createdAt > to) continue;
-    events.push({
-      id: `rec-created-${r.id}`,
-      type: "recommendation_created",
-      occurredAt: r.createdAt.toISOString(),
-      title: "New recommendation",
-      message: r.marketSignal.marketTitle ?? "Market",
-      recommendationId: r.id,
-      marketId: r.marketSignal.marketId,
-      metadata: { action: r.action, primaryActionType: r.primaryActionType },
-    });
-  }
+/**
+ * Fetch and map BehaviorFlag rows to timeline items.
+ */
+async function getBehaviorItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.behaviorFlag.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
+    orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
+  });
+  return rows.map((r) => ({
+    id: `behavior-${r.id}`,
+    eventType: "behavior_flag",
+    source: "behavior" as const,
+    title: r.type.replace(/_/g, " "),
+    message: r.description,
+    severity: r.severity,
+    entityRefs: {},
+    createdAt: r.createdAt.toISOString(),
+    metadata: (() => {
+      const o: Record<string, unknown> = {};
+      if (r.marketTitle) o.marketTitle = r.marketTitle;
+      if (r.sourceScope) o.sourceScope = r.sourceScope;
+      return Object.keys(o).length ? o : undefined;
+    })(),
+  }));
+}
 
-  // --- Recommendation lifecycle ---
-  const lifecycleEvents = await prisma.recommendationLifecycleEvent.findMany({
-    where: { funderAddress: funder },
+/**
+ * Fetch RecommendationLifecycleEvent and recommendation-created; map to timeline items.
+ */
+async function getRecommendationItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const items: TimelineItem[] = [];
+
+  const lifecycle = await prisma.recommendationLifecycleEvent.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
     include: { recommendation: { include: { marketSignal: true } } },
     orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
   });
-
-  for (const e of lifecycleEvents) {
-    if (from && e.createdAt < from) continue;
-    if (to && e.createdAt > to) continue;
+  for (const e of lifecycle) {
     const label = LIFECYCLE_LABELS[e.eventType] ?? e.eventType;
-    events.push({
+    items.push({
       id: `lifecycle-${e.id}`,
-      type: "recommendation_lifecycle",
-      occurredAt: e.createdAt.toISOString(),
+      eventType: "lifecycle_event",
+      source: "recommendation",
       title: label,
       message: e.recommendation?.marketSignal?.marketTitle ?? "Recommendation",
-      recommendationId: e.recommendationId,
-      marketId: e.recommendation?.marketSignal?.marketId ?? null,
+      severity: null,
+      entityRefs: {
+        recommendationId: e.recommendationId,
+        marketId: e.recommendation?.marketSignal?.marketId ?? null,
+      },
+      createdAt: e.createdAt.toISOString(),
       metadata: { eventType: e.eventType },
     });
   }
 
-  // --- CopilotAlert ---
-  const alerts = await prisma.copilotAlert.findMany({
-    where: { funderAddress: funder },
+  const recs = await prisma.recommendation.findMany({
+    where: { marketSignal: { funderAddress: funder } },
+    include: { marketSignal: true },
     orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
   });
-
-  for (const a of alerts) {
-    if (from && a.createdAt < from) continue;
-    if (to && a.createdAt > to) continue;
-    events.push({
-      id: `alert-${a.id}`,
-      type: "alert_triggered",
-      occurredAt: a.createdAt.toISOString(),
-      title: ALERT_TYPE_LABELS[a.type] ?? a.type,
-      message: a.message,
-      alertId: a.id,
-      marketId: a.marketId,
-      assetId: a.assetId,
-      metadata: { severity: a.severity },
+  for (const r of recs) {
+    if (!inRange(r.createdAt, since)) continue;
+    items.push({
+      id: `rec-created-${r.id}`,
+      eventType: "recommendation_created",
+      source: "recommendation",
+      title: "New recommendation",
+      message: r.marketSignal.marketTitle ?? "Market",
+      severity: null,
+      entityRefs: { recommendationId: r.id, marketId: r.marketSignal.marketId },
+      createdAt: r.createdAt.toISOString(),
+      metadata: { action: r.action, primaryActionType: r.primaryActionType },
     });
   }
 
-  // --- PortfolioSnapshot ---
-  const snapshots = await prisma.portfolioSnapshot.findMany({
-    where: { funderAddress: funder },
+  return items;
+}
+
+/**
+ * Fetch RecommendationExecutionOutcome; map to timeline items.
+ */
+async function getExecutionItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.recommendationExecutionOutcome.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
+    include: { recommendation: { include: { marketSignal: true } } },
     orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
   });
+  return rows.map((r) => ({
+    id: `execution-${r.id}`,
+    eventType: "execution_outcome",
+    source: "execution",
+    title: r.actedOn ? "Order acted on" : "Execution outcome",
+    message: r.recommendation?.marketSignal?.marketTitle ?? "Recommendation",
+    severity: null,
+    entityRefs: {
+      recommendationId: r.recommendationId,
+      marketId: r.recommendation?.marketSignal?.marketId ?? null,
+    },
+    createdAt: r.createdAt.toISOString(),
+    metadata: {
+      actedOn: r.actedOn,
+      overridden: r.overridden,
+      suggestedSize: r.suggestedSize,
+      actualSize: r.actualSize,
+      fillStatus: r.fillStatus,
+    },
+  }));
+}
 
-  for (const s of snapshots) {
-    if (from && s.createdAt < from) continue;
-    if (to && s.createdAt > to) continue;
-    const exp = parseNum(s.totalOpenExposure);
-    const positions = s.openPositionsCount ?? 0;
-    events.push({
-      id: `snapshot-${s.id}`,
-      type: "portfolio_snapshot",
-      occurredAt: s.createdAt.toISOString(),
-      title: "Portfolio snapshot",
-      message: `${positions} position(s) · ${exp >= 0 ? `$${exp.toFixed(2)}` : "—"} exposure`,
-      metadata: {
-        openPositionsCount: s.openPositionsCount,
-        totalOpenExposure: s.totalOpenExposure,
-        unrealizedPnl: s.unrealizedPnl,
-      },
-    });
-  }
+/**
+ * Fetch OrderReconciliationSnapshot; map to timeline items.
+ */
+async function getReconciliationItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.orderReconciliationSnapshot.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
+    orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
+  });
+  return rows.map((r) => ({
+    id: `reconciliation-${r.id}`,
+    eventType: "reconciliation_snapshot",
+    source: "reconciliation",
+    title: r.mismatch ? "Order mismatch" : "Order reconciliation",
+    message: r.filledSize != null ? `Filled ${r.filledSize}` : r.localStatus,
+    severity: r.mismatch ? "warning" : null,
+    entityRefs: { orderId: r.polymarketOrderId },
+    createdAt: r.createdAt.toISOString(),
+    metadata: {
+      localStatus: r.localStatus,
+      remoteStatus: r.remoteStatus,
+      filledSize: r.filledSize,
+      remainingSize: r.remainingSize,
+      mismatch: r.mismatch,
+    },
+  }));
+}
 
-  // Sort by occurredAt desc, then take limit
-  events.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
-  return events.slice(0, limit);
+/**
+ * Fetch PostTradeJournalEntry; map to timeline items.
+ */
+async function getJournalItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.postTradeJournalEntry.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
+    orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
+  });
+  return rows.map((r) => ({
+    id: `journal-${r.id}`,
+    eventType: "journal_entry",
+    source: "journal",
+    title: `Journal (${r.tag})`,
+    message: r.note,
+    severity: null,
+    entityRefs: {
+      recommendationId: r.recommendationId ?? null,
+      journalEntryId: r.id,
+    },
+    createdAt: r.createdAt.toISOString(),
+    metadata: { tag: r.tag, marketId: r.marketId, assetId: r.assetId },
+  }));
+}
+
+/**
+ * Fetch CopilotAlert; map to timeline items.
+ */
+async function getCopilotItems(funder: string, since?: Date): Promise<TimelineItem[]> {
+  const rows = await prisma.copilotAlert.findMany({
+    where: { funderAddress: funder, ...(since && { createdAt: { gte: since } }) },
+    orderBy: { createdAt: "desc" },
+    take: MAX_LIMIT,
+  });
+  return rows.map((r) => ({
+    id: `copilot-${r.id}`,
+    eventType: "copilot_alert",
+    source: "copilot",
+    title: COPILOT_ALERT_TYPE_LABELS[r.type] ?? r.type.replace(/_/g, " "),
+    message: r.message,
+    severity: r.severity,
+    entityRefs: {
+      recommendationId: r.recommendationId ?? null,
+      marketId: r.marketId ?? null,
+      assetId: r.assetId ?? null,
+      alertId: r.id,
+    },
+    createdAt: r.createdAt.toISOString(),
+    metadata: (r.metadata && typeof r.metadata === "object" && !Array.isArray(r.metadata)
+      ? (r.metadata as Record<string, unknown>)
+      : undefined),
+  }));
+}
+
+/**
+ * Build merged timeline for a funder. Newest-first; deterministic; read-only.
+ */
+export async function getPortfolioTimeline(
+  funderAddress: string,
+  options: {
+    limit?: number;
+    since?: Date;
+    source?: TimelineSourceFilter;
+  } = {}
+): Promise<TimelineItem[]> {
+  const funder = funderAddress.toLowerCase().trim();
+  const limit = Math.min(options.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+  const since = options.since;
+  const sourceFilter = options.source ?? "all";
+
+  const fetchers: Array<() => Promise<TimelineItem[]>> = [];
+
+  if (sourceFilter === "all" || sourceFilter === "drift") fetchers.push(() => getDriftItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "behavior") fetchers.push(() => getBehaviorItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "recommendation") fetchers.push(() => getRecommendationItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "execution") fetchers.push(() => getExecutionItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "reconciliation") fetchers.push(() => getReconciliationItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "journal") fetchers.push(() => getJournalItems(funder, since));
+  if (sourceFilter === "all" || sourceFilter === "copilot") fetchers.push(() => getCopilotItems(funder, since));
+
+  const results = await Promise.all(fetchers.map((f) => f()));
+  const merged = results.flat();
+  merged.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return merged.slice(0, limit);
 }

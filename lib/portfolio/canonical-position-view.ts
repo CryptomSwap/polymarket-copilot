@@ -23,11 +23,14 @@ export interface PositionRowInput {
   outcome: string;
   side: string;
   size: string;
-  avgEntry: string;
+  /** Null when basis is unavailable (do not use "0" for unknown). */
+  avgEntry: string | null;
   lastPrice: string;
-  costBasis: string;
+  /** Null when basis is unavailable. */
+  costBasis: string | null;
   marketValue: string;
-  unrealizedPnl: string;
+  /** Null when basis is unavailable (do not leak stale derived PnL). */
+  unrealizedPnl: string | null;
   realizedPnl: string;
   reservedOrderSize?: string;
   reservedOrderValue?: string;
@@ -79,17 +82,19 @@ export interface CanonicalPositionToken {
 
 export interface CanonicalPositionEconomics {
   quantity: string;
-  avgEntry: string;
+  /** Null when basis is unavailable. */
+  avgEntry: string | null;
   markPrice: string;
   /** @deprecated Use currentValue. Kept for backward compatibility. */
   exposure: string;
   /** Current mark-to-market value = quantity * markPrice (Polymarket wallet "Value"). */
   currentValue: string;
-  /** Cost basis = quantity * avgEntry (Polymarket wallet "Traded"). */
-  costBasis: string;
+  /** Null when basis is unavailable. */
+  costBasis: string | null;
   /** Max payout if outcome wins = quantity * 1.00 (Polymarket wallet "To win"). */
   maxPayout: string;
-  unrealizedPnl: string;
+  /** Null when basis is unavailable. */
+  unrealizedPnl: string | null;
   realizedPnl: string;
 }
 
@@ -100,10 +105,37 @@ export interface CanonicalPositionTiming {
   lastSyncedAt: string | null;
 }
 
+/** Canonical resolution source: how the position was linked to a synced market, or "unresolved". */
+export type ResolutionSource = "marketId" | "conditionId" | "assetId" | "unresolved";
+
+/**
+ * Quality semantics:
+ * - isResolved: true when the position is linked to a canonical market record (matchedBy != null).
+ * - resolutionSource: matchedBy ?? "unresolved" — single field for API/UI.
+ * - unresolvedReason: set when !isResolved; canonical reason string for diagnostics/UI.
+ * - hasCompleteDisplayMetadata (isCatalogComplete): true only when all required display fields present.
+ * - marketEndDatePassed: true when the market's end date is in the past (for "Resolved" time display).
+ *
+ * Completeness criteria (all required for hasCompleteDisplayMetadata):
+ * - canonical market id (non-empty, from resolved enrichment)
+ * - title (non-empty)
+ * - slug (non-empty)
+ * - category (non-empty)
+ * - theme (non-empty)
+ * - endDate (non-null)
+ */
 export interface CanonicalPositionQuality {
+  /** True when position is linked to a canonical market record (matchedBy != null). */
   isResolved: boolean;
   matchedBy: "marketId" | "conditionId" | "assetId" | null;
-  hasFullMarketMetadata: boolean;
+  /** Canonical: matchedBy ?? "unresolved". Use this for counts and UI. */
+  resolutionSource: ResolutionSource;
+  /** When !isResolved, canonical reason (e.g. "No canonical synced market resolution"). */
+  unresolvedReason: string | null;
+  /** True only when all required display fields are present (id, title, slug, category, theme, endDate). Alias: isCatalogComplete. */
+  hasCompleteDisplayMetadata: boolean;
+  /** True when the market's end date is in the past. Use for "Resolved" in time-to-resolution display. */
+  marketEndDatePassed: boolean;
   hasPriceContext: boolean;
   warnings: string[];
 }
@@ -161,16 +193,31 @@ export function buildCanonicalPositionView(
   const hoursToRes = hoursToEnd(endDateAsDate);
 
   const hasPriceContext =
-    numOrNull(position.lastPrice) != null || numOrNull(position.avgEntry) != null;
-  const hasFullMarketMetadata = enrichment.matchedBy != null;
-  const isResolved =
-    endDateAsDate != null && endDateAsDate.getTime() <= Date.now();
+    numOrNull(position.lastPrice) != null ||
+    (position.avgEntry != null && position.avgEntry !== "" && numOrNull(position.avgEntry) != null);
+  /** Linked to a canonical market record. */
+  const isResolved = enrichment.matchedBy != null;
+  /** Market end date is in the past. */
+  const marketEndDatePassed =
+    endDateAsDate != null && Number.isFinite(endDateAsDate.getTime()) && endDateAsDate.getTime() <= Date.now();
+
+  const hasCanonicalId = isResolved && strOrNull(enrichment.marketId) != null && String(enrichment.marketId).trim() !== "";
+  const hasTitle = (enrichment.marketTitle != null && String(enrichment.marketTitle).trim() !== "") || (position.marketTitle != null && position.marketTitle.trim() !== "");
+  const hasSlug = strOrNull(enrichment.marketSlug) != null && String(enrichment.marketSlug).trim() !== "";
+  const hasCategory = strOrNull(enrichment.category ?? position.category) != null && String(enrichment.category ?? position.category ?? "").trim() !== "";
+  const hasTheme = strOrNull(enrichment.theme ?? position.theme) != null && String(enrichment.theme ?? position.theme ?? "").trim() !== "";
+  const hasEndDate = endDate != null && endDate.trim() !== "";
+  const hasCompleteDisplayMetadata =
+    !!hasCanonicalId && !!hasTitle && !!hasSlug && !!hasCategory && !!hasTheme && !!hasEndDate;
 
   const warnings: string[] = [];
-  if (!hasFullMarketMetadata)
-    warnings.push("Market not resolved to catalog; link to market detail unavailable.");
-  if (hasFullMarketMetadata && strOrNull(enrichment.marketSlug) == null)
-    warnings.push("Market slug missing.");
+  if (!isResolved) warnings.push("Market not resolved to catalog; link to market detail unavailable.");
+  else {
+    if (!hasSlug) warnings.push("Market slug missing.");
+    if (!hasCategory) warnings.push("Category missing.");
+    if (!hasTheme) warnings.push("Theme missing.");
+    if (!hasEndDate) warnings.push("End date missing.");
+  }
   if (!hasPriceContext) warnings.push("No price context (lastPrice/avgEntry).");
   if (numOrNull(position.size) === 0) warnings.push("Position size is zero.");
 
@@ -180,7 +227,7 @@ export function buildCanonicalPositionView(
       id: strOrNull(enrichment.matchedBy != null ? enrichment.marketId : null) ?? null,
       conditionId: strOrNull(enrichment.conditionId ?? null) ?? null,
       slug: strOrNull(enrichment.marketSlug) ?? null,
-      title: position.marketTitle?.trim() || "Unknown market",
+      title: (enrichment.matchedBy != null && enrichment.marketTitle ? String(enrichment.marketTitle).trim() : null) || position.marketTitle?.trim() || "Unknown market",
       category: strOrNull(enrichment.category ?? position.category) ?? null,
       theme: strOrNull(enrichment.theme ?? position.theme) ?? null,
       endDate,
@@ -193,13 +240,13 @@ export function buildCanonicalPositionView(
     },
     economics: {
       quantity: position.size,
-      avgEntry: position.avgEntry,
+      avgEntry: strOrNull(position.avgEntry),
       markPrice: position.lastPrice,
       exposure: position.marketValue,
       currentValue: position.marketValue,
-      costBasis: position.costBasis,
+      costBasis: strOrNull(position.costBasis),
       maxPayout: String(Math.abs(parseFloat(position.size) || 0)),
-      unrealizedPnl: position.unrealizedPnl,
+      unrealizedPnl: strOrNull(position.unrealizedPnl),
       realizedPnl: position.realizedPnl,
     },
     timing: {
@@ -211,7 +258,10 @@ export function buildCanonicalPositionView(
     quality: {
       isResolved,
       matchedBy: enrichment.matchedBy,
-      hasFullMarketMetadata,
+      resolutionSource: (enrichment.matchedBy ?? "unresolved") as ResolutionSource,
+      unresolvedReason: isResolved ? null : "No canonical synced market resolution",
+      hasCompleteDisplayMetadata,
+      marketEndDatePassed,
       hasPriceContext,
       warnings,
     },

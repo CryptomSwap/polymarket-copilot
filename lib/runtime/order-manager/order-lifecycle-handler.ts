@@ -2,10 +2,13 @@
  * Order lifecycle handler: applies normalized ack/partial fill/full fill/cancel/reject
  * to the store and emits order.* events. Position updater can subscribe to order.filled.
  * No live exchange; call from paper or future exchange webhook seam.
+ * When journalAppend is provided, each transition is durably journaled (append-only).
  */
 
 import type { RuntimeEventBus } from "../events/runtime-event-bus";
 import { createRuntimeEventId } from "../events/runtime-events";
+import type { AppendOrderLifecycleEventParams } from "../journal/order-lifecycle-journal";
+import { ORDER_LIFECYCLE_EVENT_TYPES } from "../journal/order-lifecycle-journal";
 import type {
   OrderAckPayload,
   OrderPartialFillPayload,
@@ -27,6 +30,8 @@ const EVENT_SOURCE = "order_manager" as const;
 export interface OrderLifecycleHandlerOptions {
   store: OrderLifecycleStore;
   eventBus?: RuntimeEventBus;
+  /** When set, each lifecycle transition is appended to the order lifecycle journal (append-only). */
+  journalAppend?: (params: AppendOrderLifecycleEventParams) => void | Promise<void>;
 }
 
 export interface OrderLifecycleHandler {
@@ -49,10 +54,24 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
   }
 
   applyAck(input: OrderAckInput): void {
-    const { store, eventBus } = this.options;
+    const { store, eventBus, journalAppend } = this.options;
     const order = store.get(input.clientOrderId);
     if (!order) return;
     store.applyAck(input.clientOrderId, input.exchangeOrderId);
+    if (journalAppend) {
+      void journalAppend({
+        funderAddress: order.funderAddress,
+        clientOrderId: input.clientOrderId,
+        exchangeOrderId: input.exchangeOrderId,
+        intentId: order.intentId,
+        assetId: order.assetId,
+        marketId: order.marketId,
+        side: order.side,
+        eventType: ORDER_LIFECYCLE_EVENT_TYPES.ACK,
+        payloadJson: JSON.stringify({ exchangeOrderId: input.exchangeOrderId }),
+        occurredAt: input.acknowledgedAt,
+      }).catch(() => {});
+    }
     if (eventBus) {
       const payload: OrderAckPayload = {
         funderAddress: order.funderAddress,
@@ -72,13 +91,31 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
   }
 
   applyPartialFill(input: OrderPartialFillInput): void {
-    const { store, eventBus } = this.options;
+    const { store, eventBus, journalAppend } = this.options;
     const order = store.get(input.clientOrderId);
     if (!order || input.fillSize <= 0) return;
     const prevFilled = order.filledSize;
     store.applyPartialFill(input.clientOrderId, input.fillSize, input.fillPrice);
     const updated = store.get(input.clientOrderId);
     if (!updated) return;
+    if (journalAppend) {
+      void journalAppend({
+        funderAddress: order.funderAddress,
+        clientOrderId: input.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        intentId: order.intentId,
+        assetId: order.assetId,
+        marketId: order.marketId,
+        side: order.side,
+        eventType: ORDER_LIFECYCLE_EVENT_TYPES.PARTIAL_FILL,
+        payloadJson: JSON.stringify({
+          fillSize: input.fillSize,
+          fillPrice: input.fillPrice,
+          exchangeFillId: input.exchangeFillId,
+        }),
+        occurredAt: input.filledAt,
+      }).catch(() => {});
+    }
     if (eventBus) {
       const payload: OrderPartialFillPayload = {
         funderAddress: order.funderAddress,
@@ -89,6 +126,7 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
         remainingSize: updated.remainingSize,
         fillPrice: input.fillPrice,
         filledAt: input.filledAt,
+        exchangeFillId: input.exchangeFillId ?? undefined,
       };
       eventBus.publish({
         id: createRuntimeEventId(),
@@ -99,12 +137,12 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
       });
     }
     if (updated.status === "filled" && eventBus) {
-      this.emitFilled(order, updated.filledSize, input.fillPrice, input.filledAt);
+      this.emitFilled(order, updated.filledSize, input.fillPrice, input.filledAt, input.exchangeFillId);
     }
   }
 
   applyFullFill(input: OrderFullFillInput): void {
-    const { store, eventBus } = this.options;
+    const { store, eventBus, journalAppend } = this.options;
     const order = store.get(input.clientOrderId);
     if (!order) return;
     const remaining = order.remainingSize;
@@ -112,8 +150,26 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
       store.applyFill(input.clientOrderId, remaining, input.avgPrice);
     }
     const updated = store.get(input.clientOrderId);
+    if (updated && journalAppend && remaining > 0) {
+      void journalAppend({
+        funderAddress: order.funderAddress,
+        clientOrderId: input.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        intentId: order.intentId,
+        assetId: order.assetId,
+        marketId: order.marketId,
+        side: order.side,
+        eventType: ORDER_LIFECYCLE_EVENT_TYPES.FILL,
+        payloadJson: JSON.stringify({
+          totalFilledSize: input.totalFilledSize,
+          avgPrice: input.avgPrice,
+          exchangeFillId: input.exchangeFillId,
+        }),
+        occurredAt: input.filledAt,
+      }).catch(() => {});
+    }
     if (updated && eventBus && remaining > 0) {
-      this.emitFilled(order, input.totalFilledSize, input.avgPrice, input.filledAt);
+      this.emitFilled(order, input.totalFilledSize, input.avgPrice, input.filledAt, input.exchangeFillId);
     }
   }
 
@@ -121,7 +177,8 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
     order: { funderAddress: string; clientOrderId: string; exchangeOrderId: string | null; assetId: string; marketId: string; side: "BUY" | "SELL" },
     totalFilledSize: number,
     avgPrice: number,
-    filledAt: Date
+    filledAt: Date,
+    exchangeFillId?: string | null
   ): void {
     const { eventBus } = this.options;
     if (!eventBus) return;
@@ -135,6 +192,7 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
       totalFilledSize,
       avgPrice,
       filledAt,
+      exchangeFillId: exchangeFillId ?? undefined,
     };
     eventBus.publish({
       id: createRuntimeEventId(),
@@ -146,10 +204,24 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
   }
 
   applyCancelAck(input: OrderCancelAckInput): void {
-    const { store, eventBus } = this.options;
+    const { store, eventBus, journalAppend } = this.options;
     const order = store.get(input.clientOrderId);
     if (!order) return;
     store.applyCancel(input.clientOrderId);
+    if (journalAppend) {
+      void journalAppend({
+        funderAddress: order.funderAddress,
+        clientOrderId: input.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        intentId: order.intentId,
+        assetId: order.assetId,
+        marketId: order.marketId,
+        side: order.side,
+        eventType: ORDER_LIFECYCLE_EVENT_TYPES.CANCELED,
+        payloadJson: input.reason != null ? JSON.stringify({ reason: input.reason }) : null,
+        occurredAt: input.canceledAt,
+      }).catch(() => {});
+    }
     if (eventBus) {
       const payload: OrderCanceledPayload = {
         funderAddress: order.funderAddress,
@@ -170,10 +242,24 @@ export class DefaultOrderLifecycleHandler implements OrderLifecycleHandler {
   }
 
   applyRejection(input: OrderRejectInput): void {
-    const { store, eventBus } = this.options;
+    const { store, eventBus, journalAppend } = this.options;
     const order = store.get(input.clientOrderId);
     if (!order) return;
     store.applyReject(input.clientOrderId);
+    if (journalAppend) {
+      void journalAppend({
+        funderAddress: order.funderAddress,
+        clientOrderId: input.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        intentId: order.intentId,
+        assetId: order.assetId,
+        marketId: order.marketId,
+        side: order.side,
+        eventType: ORDER_LIFECYCLE_EVENT_TYPES.REJECTED,
+        payloadJson: JSON.stringify({ reason: input.reason }),
+        occurredAt: input.rejectedAt,
+      }).catch(() => {});
+    }
     if (eventBus) {
       const payload: OrderRejectedPayload = {
         funderAddress: order.funderAddress,

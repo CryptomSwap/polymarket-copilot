@@ -18,6 +18,17 @@ const MARKET_SELECT = {
   status: true,
 } as const;
 
+/** Safe Date to ISO string; never throws. Invalid dates return null. */
+function endDateToIso(d: Date | null | undefined): string | null {
+  if (d == null) return null;
+  try {
+    const t = new Date(d).getTime();
+    return Number.isFinite(t) ? new Date(d).toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface EnrichPositionsBatchInput {
   marketId: string;
   assetId: string;
@@ -33,6 +44,10 @@ export interface EnrichPositionsBatchResult {
     matchedByConditionId: number;
     matchedByAssetId: number;
     unresolved: number;
+    /** Count of SyncedAsset rows available for matching (by tokenId). */
+    syncedTokenCount: number;
+    /** Sample raw market/asset identifiers that did not resolve (for debugging). */
+    sampleUnresolvedIdentifiers: { rawMarketRef: string; assetId: string }[];
   };
 }
 
@@ -42,9 +57,17 @@ export interface EnrichPositionsBatchResult {
 export async function enrichPositionsBatch(
   positions: EnrichPositionsBatchInput[]
 ): Promise<EnrichPositionsBatchResult> {
-  const marketIds = Array.from(new Set(positions.map((p) => p.marketId.trim()).filter(Boolean)));
-  const assetIds = Array.from(new Set(positions.map((p) => p.assetId.trim()).filter(Boolean)));
-  const diagnostics = { matchedByMarketId: 0, matchedByConditionId: 0, matchedByAssetId: 0, unresolved: 0 };
+  const safeStr = (s: string | null | undefined) => String(s ?? "").trim();
+  const marketIds = Array.from(new Set(positions.map((p) => safeStr(p.marketId)).filter(Boolean)));
+  const assetIds = Array.from(new Set(positions.map((p) => safeStr(p.assetId)).filter(Boolean)));
+  const diagnostics = {
+    matchedByMarketId: 0,
+    matchedByConditionId: 0,
+    matchedByAssetId: 0,
+    unresolved: 0,
+    syncedTokenCount: 0,
+    sampleUnresolvedIdentifiers: [] as { rawMarketRef: string; assetId: string }[],
+  };
 
   const byId =
     marketIds.length > 0
@@ -79,16 +102,26 @@ export async function enrichPositionsBatch(
 
   const normalizeId = (s: string) => String(s ?? "").trim();
   const assetIdsNorm = assetIds.map(normalizeId).filter(Boolean);
+  const assetIdVariants = Array.from(
+    new Set([...assetIdsNorm, ...assetIdsNorm.map((id) => id.toLowerCase())])
+  );
   const assets =
-    assetIdsNorm.length > 0
+    assetIdVariants.length > 0
       ? await prisma.syncedAsset.findMany({
-          where: { tokenId: { in: assetIdsNorm } },
+          where: { tokenId: { in: assetIdVariants } },
           include: { syncedMarket: { select: MARKET_SELECT } },
         })
       : [];
-  const marketByAssetId = new Map(assets.map((a) => [normalizeId(a.tokenId), a.syncedMarket]));
+  const marketByAssetId = new Map<string, (typeof assets)[0]["syncedMarket"]>();
+  for (const a of assets) {
+    const key = normalizeId(a.tokenId);
+    marketByAssetId.set(key, a.syncedMarket);
+    marketByAssetId.set(key.toLowerCase(), a.syncedMarket);
+  }
+  diagnostics.syncedTokenCount = assets.length;
 
   const result: PositionEnrichmentInput[] = [];
+  const unresolvedSamples: { rawMarketRef: string; assetId: string }[] = [];
 
   for (const p of positions) {
     const byIdM = marketById.get(p.marketId);
@@ -118,14 +151,15 @@ export async function enrichPositionsBatch(
         marketSlug: byCondM.slug,
         category: byCondM.category ?? null,
         theme,
-        endDate: byCondM.endDate?.toISOString() ?? null,
+        endDate: endDateToIso(byCondM.endDate) ?? null,
         matchedBy: "conditionId",
         conditionId: byCondM.conditionId ?? null,
         status: byCondM.status ?? null,
       });
       continue;
     }
-    const byAssetM = marketByAssetId.get(normalizeId(p.assetId));
+    const normAsset = normalizeId(p.assetId);
+    const byAssetM = marketByAssetId.get(normAsset) ?? marketByAssetId.get(normAsset.toLowerCase());
     if (byAssetM) {
       diagnostics.matchedByAssetId++;
       const theme = deriveTheme(byAssetM.title, (byAssetM.category as MarketCategory) ?? "other");
@@ -135,7 +169,7 @@ export async function enrichPositionsBatch(
         marketSlug: byAssetM.slug,
         category: byAssetM.category ?? null,
         theme,
-        endDate: byAssetM.endDate?.toISOString() ?? null,
+        endDate: endDateToIso(byAssetM.endDate) ?? null,
         matchedBy: "assetId",
         conditionId: byAssetM.conditionId ?? null,
         status: byAssetM.status ?? null,
@@ -143,6 +177,9 @@ export async function enrichPositionsBatch(
       continue;
     }
     diagnostics.unresolved++;
+    if (unresolvedSamples.length < 5) {
+      unresolvedSamples.push({ rawMarketRef: safeStr(p.marketId), assetId: safeStr(p.assetId) });
+    }
     result.push({
       marketId: p.marketId,
       marketTitle: p.marketTitle ?? "Unknown market",
@@ -153,6 +190,7 @@ export async function enrichPositionsBatch(
       matchedBy: null,
     });
   }
+  diagnostics.sampleUnresolvedIdentifiers = unresolvedSamples;
 
   return { enriched: result, diagnostics };
 }

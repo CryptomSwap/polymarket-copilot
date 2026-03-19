@@ -9,14 +9,15 @@
  */
 
 import { createUserWs, defaultWsUserLog } from "../lib/polymarket/ws-user";
-import { createMarketWs } from "../lib/polymarket/ws-market";
+import { createMarketWs, type MarketSubscriptionCoverage } from "../lib/polymarket/ws-market";
 import type { StreamConnectionState } from "../lib/runtime/stream-connection-state";
 import { getTrackedAssetIds } from "../lib/polymarket/tracked-assets";
 import { getFunderForRecompute } from "../lib/polymarket/recompute";
-import { updateStreamSyncState } from "../lib/live/streaming-sync";
+import { updateStreamSyncState, getStreamSyncState, shouldRetryTrackedAssetsWithNoFunder } from "../lib/live/streaming-sync";
 import { normalizeMarketFeedMessage, feedNormalizedUpdatesToEngine } from "../lib/live/market-feed-normalizer";
 import { normalizeUserFeedMessage } from "../lib/live/user-feed-normalizer";
 import { feedUserFeedResultToRuntime, type UserFeedRuntimeTelemetry } from "../lib/live/user-feed-to-runtime";
+import type { RuntimeLatencyMonitor } from "../lib/runtime/telemetry/runtime-latency-monitor";
 import { InMemoryRuntimeEventBus } from "../lib/runtime/events/runtime-event-bus";
 import { InMemoryMarketStateStore } from "../lib/runtime/market-state/market-state-store";
 import { MarketStateEngine } from "../lib/runtime/market-state/market-state-engine";
@@ -54,6 +55,10 @@ export interface StreamRuntimeDepsForWs {
   orderStore: InMemoryOrderLifecycleStore;
   orderLifecycleHandler: DefaultOrderLifecycleHandler;
   botRuntime: DefaultBotRuntime;
+  /** Called after feeding normalized market updates to the engine (for diagnostics.marketUpdatesApplied). */
+  onMarketUpdatesApplied?: (count: number) => void;
+  /** Optional latency/integrity monitor for stream-to-engine and normalization timing. */
+  latencyMonitor?: RuntimeLatencyMonitor | null;
 }
 
 /** Real connection state for health/dashboard/snapshot. */
@@ -81,11 +86,19 @@ export function getStreamRuntimeStatus(): {
 } {
   const { market, user } = getStreamConnectionStates();
   return {
-    marketWsActive: market?.status === "open" ?? false,
-    userWsActive: user?.status === "open" ?? false,
+    marketWsActive: !!(market?.status === "open"),
+    userWsActive: !!(user?.status === "open"),
     marketConnection: market,
     userConnection: user,
   };
+}
+
+/** Market WS subscription coverage (desired vs subscribed, pending, churn). Null if no market WS. */
+export function getMarketSubscriptionCoverage(): MarketSubscriptionCoverage | null {
+  if (!marketWs || typeof (marketWs as { getSubscriptionCoverage?: () => MarketSubscriptionCoverage }).getSubscriptionCoverage !== "function") {
+    return null;
+  }
+  return (marketWs as { getSubscriptionCoverage: () => MarketSubscriptionCoverage }).getSubscriptionCoverage();
 }
 
 /** Telemetry for user-feed → runtime (lifecycle applied, unmatched, mismatches). Read-only for observers. */
@@ -93,6 +106,7 @@ export const userFeedRuntimeTelemetry: UserFeedRuntimeTelemetry = {
   lifecycleApplied: 0,
   unmatchedOrderEvents: 0,
   lifecycleMismatch: 0,
+  fillLedgerDuplicatesSkipped: 0,
 };
 
 async function refreshTrackedAssetsAndSubscriptions(): Promise<void> {
@@ -101,8 +115,11 @@ async function refreshTrackedAssetsAndSubscriptions(): Promise<void> {
   await updateStreamSyncState({ trackedAssetCount: assetIds.length });
 
   if (marketWs) {
-    marketWs.setTrackedAssetIds(assetIds);
-    if (marketStateEngine) marketStateEngine.setTrackedAssetIds(assetIds);
+    // Do not overwrite with empty when we had a non-empty set (avoids clearing due to transient empty result).
+    if (assetIds.length > 0) {
+      marketWs.setTrackedAssetIds(assetIds);
+      if (marketStateEngine) marketStateEngine.setTrackedAssetIds(assetIds);
+    }
     return;
   }
   if (assetIds.length === 0) return;
@@ -170,22 +187,19 @@ export async function startWebsockets(): Promise<void> {
   setBotRuntimeForDebug(botRuntime);
   userWs = createUserWs({ log });
   userWs.onMessage((msg) => {
-    try {
-      const result = normalizeUserFeedMessage(funder ?? "", msg);
-      if (result && orderStore) {
-        feedUserFeedResultToRuntime(result, {
-          orderStore,
-          lifecycleHandler: orderLifecycleHandler,
-          log: (level, message, meta) => log(level === "warn" ? "warn" : "info", message, meta),
-          telemetry: userFeedRuntimeTelemetry,
-        });
-      }
-    } catch (e) {
-      log("warn", "User feed to runtime error", { error: String(e) });
+    const result = normalizeUserFeedMessage(funder ?? "", msg);
+    if (result && orderStore) {
+      void feedUserFeedResultToRuntime(result, {
+        orderStore,
+        lifecycleHandler: orderLifecycleHandler,
+        fillLedgerEnabled: true,
+        log: (level, message, meta) => log(level === "warn" ? "warn" : "info", message, meta),
+        telemetry: userFeedRuntimeTelemetry,
+      }).catch((e) => log("warn", "User feed to runtime error", { error: String(e) }));
     }
   });
   userWs.connect().then(
-    () => log("info", "User WebSocket connected", {}),
+    () => log("info", "User WebSocket connected and ready", {}),
     (err) => log("error", "User WebSocket connect failed", { error: String(err) })
   );
 
@@ -236,37 +250,65 @@ export async function startWebsocketsWithRuntime(
   const funder = funderOverride ?? (await getFunderForRecompute()) ?? "";
   userWs = createUserWs({ log });
   userWs.onMessage((msg) => {
-    try {
-      const result = normalizeUserFeedMessage(funder, msg);
-      if (result && orderStore) {
-        feedUserFeedResultToRuntime(result, {
-          orderStore,
-          lifecycleHandler: orderLifecycleHandler,
-          log: (level, message, meta) => log(level === "warn" ? "warn" : "info", message, meta),
-          telemetry: userFeedRuntimeTelemetry,
-        });
-      }
-    } catch (e) {
-      log("warn", "User feed to runtime error", { error: String(e) });
+    const receivedAt = Date.now();
+    const normStart = Date.now();
+    const result = normalizeUserFeedMessage(funder, msg);
+    deps.latencyMonitor?.recordUserNormalizationMs(Date.now() - normStart);
+    if (!result) {
+      deps.latencyMonitor?.recordMalformedUserPayload();
+      return;
+    }
+    if (orderStore) {
+      const beforeApply = Date.now();
+      void feedUserFeedResultToRuntime(result, {
+        orderStore,
+        lifecycleHandler: orderLifecycleHandler,
+        fillLedgerEnabled: true,
+        log: (level, message, meta) => log(level === "warn" ? "warn" : "info", message, meta),
+        telemetry: userFeedRuntimeTelemetry,
+        onUnmatchedExchangeOrderId: () => deps.latencyMonitor?.recordUnmatchedExchangeOrderId(),
+        onDuplicateLifecycleEvent: () => deps.latencyMonitor?.recordDuplicateLifecycleEvent(),
+      })
+        .then(() => {
+          deps.latencyMonitor?.recordUserStreamToEngineMs(Date.now() - receivedAt);
+          deps.latencyMonitor?.recordLifecycleApplyMs(Date.now() - beforeApply);
+        })
+        .catch((e) => log("warn", "User feed to runtime error", { error: String(e) }));
+    } else {
+      deps.latencyMonitor?.recordUserStreamToEngineMs(Date.now() - receivedAt);
     }
   });
   userWs.connect().then(
-    () => log("info", "User WebSocket connected", {}),
+    () => log("info", "User WebSocket connected and ready", {}),
     (err) => log("error", "User WebSocket connect failed", { error: String(err) })
   );
 
-  const assetIds = await getTrackedAssetIds({ funderAddress: funder || undefined });
+  let assetIds = await getTrackedAssetIds({ funderAddress: funder || undefined });
+  if (shouldRetryTrackedAssetsWithNoFunder(assetIds, (await getStreamSyncState())?.trackedAssetCount ?? null)) {
+    assetIds = await getTrackedAssetIds({ funderAddress: undefined });
+  }
   await updateStreamSyncState({ trackedAssetCount: assetIds.length });
   if (marketStateEngine) marketStateEngine.setTrackedAssetIds(assetIds);
 
   if (assetIds.length > 0) {
     marketWs = createMarketWs(assetIds);
     marketWs.onMessage((msg) => {
+      const receivedAt = Date.now();
       try {
+        const normStart = Date.now();
         const updates = normalizeMarketFeedMessage(msg);
+        deps.latencyMonitor?.recordMarketNormalizationMs(Date.now() - normStart);
+        if (msg != null && updates.length === 0) {
+          deps.latencyMonitor?.recordMalformedMarketPayload();
+        }
+        const applyStart = Date.now();
         feedNormalizedUpdatesToEngine(updates, marketStateEngine);
+        deps.latencyMonitor?.recordMarketEngineApplyMs(Date.now() - applyStart);
+        deps.latencyMonitor?.recordMarketStreamToEngineMs(Date.now() - receivedAt);
+        if (updates.length > 0) deps.onMarketUpdatesApplied?.(updates.length);
       } catch (e) {
         log("warn", "Market feed normalizer error", { error: String(e) });
+        deps.latencyMonitor?.recordMalformedMarketPayload();
       }
     });
     marketWs.connect().then(

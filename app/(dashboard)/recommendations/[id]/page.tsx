@@ -11,7 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Loader2, ChevronDown, ChevronRight, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TradePreviewCard } from "@/components/orders/trade-preview-card";
 
@@ -130,6 +130,37 @@ const LEGACY_ACTION_LABELS: Record<string, string> = {
   TRIM: "Trim",
   EXIT: "Exit",
 };
+
+/** Shape returned by GET /api/recommendations/[id]/explain */
+interface RecommendationExplanationResponse {
+  recommendationId: string;
+  marketRef: { marketId: string; marketTitle?: string | null; outcome?: string | null; assetId?: string | null } | null;
+  assetId: string | null;
+  action: string;
+  primaryActionType: string | null;
+  suggestedSize: string;
+  suggestedEntryMin: string | null;
+  suggestedEntryMax: string | null;
+  signalInputs: Record<string, string | null>;
+  category: string | null;
+  theme: string | null;
+  rationale: string | null;
+  thesis: string | null;
+  timingNote: string | null;
+  riskNote: string | null;
+  blocker: string | null;
+  portfolioImpact: string | null;
+  evaluationRefs: Array<{ id: string; evaluatedAt: string; marketPriceAtEval: string }>;
+  reviewRef: { status: string; reviewerNote: string | null } | null;
+  createdAt: string;
+  updatedAt: string;
+  summary: string | null;
+  drivers: Record<string, string>;
+  penalties: Record<string, string>;
+  sizing: Record<string, string>;
+  quality: Record<string, string>;
+  review: Record<string, string>;
+}
 
 /** One-line "why" for primary action (for diagnostics panel). */
 function whyActionSummary(
@@ -288,6 +319,8 @@ export default function RecommendationDetailPage() {
   const [reviewerNote, setReviewerNote] = useState("");
   const [savingReview, setSavingReview] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [explanation, setExplanation] = useState<RecommendationExplanationResponse | null>(null);
+  const [explanationLoading, setExplanationLoading] = useState(false);
 
   const fetchDetail = useCallback(async () => {
     if (!id) return;
@@ -310,6 +343,20 @@ export default function RecommendationDetailPage() {
   useEffect(() => {
     fetchDetail();
   }, [fetchDetail]);
+
+  const fetchExplanation = useCallback(async () => {
+    if (!id || explanationLoading || explanation) return;
+    setExplanationLoading(true);
+    try {
+      const res = await fetch(`/api/recommendations/${id}/explain`);
+      if (res.ok) {
+        const data = await res.json();
+        setExplanation(data);
+      }
+    } finally {
+      setExplanationLoading(false);
+    }
+  }, [id, explanationLoading, explanation]);
 
   const setReview = async (status: string, note?: string) => {
     setSavingReview(true);
@@ -649,6 +696,120 @@ export default function RecommendationDetailPage() {
             )}
           </CardContent>
         )}
+      </Card>
+
+      {/* Recommendation explanation: normalized explainability from stored data (GET /api/recommendations/[id]/explain) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <FileText className="h-4 w-4 text-muted-foreground" />
+            Why this recommendation
+          </CardTitle>
+          <CardDescription>
+            Deterministic explanation from stored signal, rationale, and review. No AI-generated text.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {!explanation && !explanationLoading && (
+            <Button variant="outline" size="sm" onClick={fetchExplanation}>
+              Show explanation
+            </Button>
+          )}
+          {explanationLoading && (
+            <p className="text-sm text-muted-foreground flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </p>
+          )}
+          {explanation && (
+            <div className="space-y-4 text-sm">
+              {explanation.summary && (
+                <div className="rounded-lg bg-muted/50 border border-border px-3 py-2">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
+                  <p className="text-foreground">{explanation.summary}</p>
+                </div>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {Object.keys(explanation.drivers).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Drivers</p>
+                    <ul className="space-y-1">
+                      {Object.entries(explanation.drivers).map(([k, v]) => (
+                        <li key={k} className="flex flex-wrap gap-1">
+                          <span className="text-muted-foreground">{k}:</span>
+                          <span className="text-foreground">{v}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {Object.keys(explanation.penalties).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Penalties</p>
+                    <ul className="space-y-1">
+                      {Object.entries(explanation.penalties).map(([k, v]) => (
+                        <li key={k} className="flex flex-wrap gap-1">
+                          <span className="text-muted-foreground">{k}:</span>
+                          <span className="text-foreground">{v}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+              {Object.keys(explanation.sizing).length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Sizing</p>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                    {Object.entries(explanation.sizing).map(([k, v]) => (
+                      <span key={k} className="flex gap-2">
+                        <dt>{k}</dt>
+                        <dd className="tabular-nums text-foreground">{v}</dd>
+                      </span>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              {Object.keys(explanation.quality).length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400 mb-2">Quality / blockers</p>
+                  <ul className="space-y-1">
+                    {Object.entries(explanation.quality).map(([k, v]) => (
+                      <li key={k}><span className="text-muted-foreground">{k}:</span> <span className="text-foreground">{v}</span></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {Object.keys(explanation.review).length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Review</p>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    {Object.entries(explanation.review).map(([k, v]) => (
+                      <span key={k} className="flex gap-2">
+                        <dt className="text-muted-foreground">{k}</dt>
+                        <dd className="text-foreground">{v}</dd>
+                      </span>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              <div className="border-t border-border pt-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Source fields</p>
+                <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-muted-foreground">
+                  {explanation.rationale && <><dt>Rationale</dt><dd className="text-foreground col-span-2 sm:col-span-2">{explanation.rationale}</dd></>}
+                  {explanation.thesis && <><dt>Thesis</dt><dd className="text-foreground col-span-2 sm:col-span-2">{explanation.thesis}</dd></>}
+                  {explanation.timingNote && <><dt>Timing</dt><dd className="text-foreground">{explanation.timingNote}</dd></>}
+                  {explanation.riskNote && <><dt>Risk</dt><dd className="text-foreground">{explanation.riskNote}</dd></>}
+                  {explanation.blocker && <><dt>Blocker</dt><dd className="text-amber-700 dark:text-amber-400">{explanation.blocker}</dd></>}
+                  {explanation.portfolioImpact && <><dt>Portfolio impact</dt><dd className="text-foreground">{explanation.portfolioImpact}</dd></>}
+                  {explanation.signalInputs?.marketPrice != null && <><dt>Market price</dt><dd className="tabular-nums text-foreground">{explanation.signalInputs.marketPrice}</dd></>}
+                  {explanation.signalInputs?.fairPrice != null && <><dt>Fair price</dt><dd className="tabular-nums text-foreground">{explanation.signalInputs.fairPrice}</dd></>}
+                  {explanation.signalInputs?.edge != null && <><dt>Edge</dt><dd className="tabular-nums text-foreground">{explanation.signalInputs.edge}</dd></>}
+                  {explanation.signalInputs?.confidence != null && <><dt>Confidence</dt><dd className="tabular-nums text-foreground">{explanation.signalInputs.confidence}</dd></>}
+                </dl>
+              </div>
+            </div>
+          )}
+        </CardContent>
       </Card>
 
       {lifecycleEvents.length > 0 && (

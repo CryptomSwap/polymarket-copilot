@@ -1,4 +1,8 @@
 /**
+ * @deprecated Legacy blended score path. The active decision path uses the staged decision engine
+ * (evaluate-staged.ts + stages/*). Recompute does not use this module. Kept for reference only;
+ * do not use in new code. See docs/DECISION_ENGINE_STAGED_MODEL.md and docs/ARCHITECTURE_CONSOLIDATION.md.
+ *
  * Blended score: heuristic + ML + news + portfolio + behavior + setup performance + review state.
  * Advisory only; hard blocks are applied in policy layer.
  */
@@ -23,7 +27,8 @@ export interface BlendInput {
   newsCatalystBoost: number;
   newsSaturationPenalty: number;
   themeExposurePct: number;
-  topConcentrationPct: number;
+  /** Largest theme % of portfolio. */
+  topThemeConcentrationPct: number;
   behaviorPenalty: number;
   portfolioPenalty: number;
   setupAdjustment: SetupAdjustmentInput;
@@ -59,7 +64,7 @@ export function computeBlendedScore(input: BlendInput): {
   const heuristic = parseNum(input.heuristicPriorityScore);
   const ml = input.mlScore != null ? parseNum(input.mlScore) : null;
   const themeExp = input.themeExposurePct;
-  const topConc = input.topConcentrationPct;
+  const topConc = input.topThemeConcentrationPct;
   const behPen = input.behaviorPenalty;
   const portPen = input.portfolioPenalty;
   const setup = input.setupAdjustment;

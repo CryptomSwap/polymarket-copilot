@@ -42,5 +42,7 @@ export async function GET(request: Request) {
     channels: byChannel,
     userFeed: byChannel["user-feed"] ?? { connected: false, lastHeartbeatAt: null, lastMessageAt: null, lastError: null, updatedAt: new Date().toISOString() },
     marketFeed: byChannel["market-feed"] ?? { connected: false, lastHeartbeatAt: null, lastMessageAt: null, lastError: null, updatedAt: new Date().toISOString() },
+    /** For connection vs heartbeat vs real data vs reconciled vs safeToAutomate, use GET /api/live/stream-health (includes operatorHealth when runtime is running). */
+    streamHealthUrl: "/api/live/stream-health",
   });
 }
