@@ -19,12 +19,17 @@ export async function trainShadowModel(
 ): Promise<TrainShadowResult> {
   const { funderAddress, candidateSource, limit = 2000, createdAfter, createdBefore, trainRatio = 0.8, debug = false } = options;
 
-  const where: { funderAddress?: string; candidateSource?: string; createdAt?: { gte?: Date; lte?: Date }; [k: string]: unknown } = {};
-  if (funderAddress) where.funderAddress = funderAddress.toLowerCase().trim();
-  if (candidateSource) where.candidateSource = candidateSource;
-  if (createdAfter) where.createdAt = { ...where.createdAt, gte: createdAfter };
-  if (createdBefore) where.createdAt = { ...where.createdAt, lte: createdBefore };
-  // Only rows with a non-null label for the chosen target
+  const filterWithoutLabel: {
+    funderAddress?: string;
+    candidateSource?: string;
+    createdAt?: { gte?: Date; lte?: Date };
+  } = {};
+  if (funderAddress) filterWithoutLabel.funderAddress = funderAddress.toLowerCase().trim();
+  if (candidateSource) filterWithoutLabel.candidateSource = candidateSource;
+  if (createdAfter) filterWithoutLabel.createdAt = { ...filterWithoutLabel.createdAt, gte: createdAfter };
+  if (createdBefore) filterWithoutLabel.createdAt = { ...filterWithoutLabel.createdAt, lte: createdBefore };
+
+  const where: typeof filterWithoutLabel & { [k: string]: unknown } = { ...filterWithoutLabel };
   where[targetLabel] = { not: null };
 
   const rows = await prisma.mlShadowTrainingExample.findMany({
@@ -42,13 +47,35 @@ export async function trainShadowModel(
     console.warn(`[train-shadow] ${e}`);
   }
   if (valid.length < 10) {
+    let error = `Insufficient shadow training data (${valid.length} with ${targetLabel}). Need at least 10.`;
+    if (targetLabel === "labelGoodDecision") {
+      try {
+        const [totalRows, with12h] = await Promise.all([
+          prisma.mlShadowTrainingExample.count({ where: filterWithoutLabel }),
+          prisma.mlShadowTrainingExample.count({
+            where: { ...filterWithoutLabel, labelGoodDecision12h: { not: null } },
+          }),
+        ]);
+        if (totalRows > 0) {
+          error += ` MlShadowTrainingExample rows (same filters): ${totalRows}.`;
+        }
+        if (with12h >= 10) {
+          error += ` ${with12h} rows have labelGoodDecision12h — try: --target labelGoodDecision12h (24h outcomeClassification requires evaluateShadowCandidates + 24h prices).`;
+        } else if (totalRows === 0) {
+          error +=
+            " No MlShadowTrainingExample rows — run shadow_evaluation then POST /api/ops/ml-shadow-dataset (or wait for scheduled ml_shadow_dataset_build).";
+        }
+      } catch {
+        /* keep short error */
+      }
+    }
     return {
       success: false,
       targetLabel,
       datasetSize: valid.length,
       trainCount: 0,
       validationCount: 0,
-      error: `Insufficient shadow training data (${valid.length} with ${targetLabel}). Need at least 10.`,
+      error,
     };
   }
 

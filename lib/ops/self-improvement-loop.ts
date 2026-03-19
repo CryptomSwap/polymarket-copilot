@@ -259,7 +259,13 @@ export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
 
   const active = await getActiveOrApprovedShadowModel();
   if (!active?.run.id) {
-    throw new Error("self_improve_missing_champion");
+    await writeJsonReport("model-promotion-report", {
+      generatedAt: new Date().toISOString(),
+      status: "skipped",
+      reason: "no_active_or_approved_shadow_champion",
+      hint: "Activate or approve a shadow model first: POST /api/ml/activate-latest-shadow or POST /api/ml/approve-run with a shadow runId.",
+    });
+    return;
   }
   const champion = await prisma.mlModelRun.findUnique({ where: { id: active.run.id } });
   if (!champion?.metricsJson) throw new Error("self_improve_champion_not_found");

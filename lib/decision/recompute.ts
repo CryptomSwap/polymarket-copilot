@@ -56,6 +56,23 @@ export async function getFunderForDecisionRecompute(funderOverride?: string): Pr
 }
 
 /**
+ * Funder for `paper_trading_tick` candidate load.
+ *
+ * Prefer the same address as `getFunderForRecompute()` (credentials / connected wallet) so the
+ * recommendation + DecisionPolicySnapshot universe matches `stream-runtime` automation, which
+ * emits `runtime_automated` ShadowCandidates for that wallet.
+ *
+ * When no credentials funder exists, fall back to `getFunderForDecisionRecompute()` (snapshot-count
+ * heuristic) so dev / empty-wallet environments still load candidates when possible.
+ */
+export async function getFunderForPaperTradingTick(funderOverride?: string): Promise<string | null> {
+  if (funderOverride?.trim()) return funderOverride.trim().toLowerCase();
+  const credsFunder = await getFunderForRecompute();
+  if (credsFunder) return credsFunder;
+  return getFunderForDecisionRecompute();
+}
+
+/**
  * Rebuild setup performance profiles, then compute decision snapshots for all current recommendations.
  * Uses getFunderForDecisionRecompute when funderAddress not provided, so snapshots can be generated for paper trading from recommendation-owned funder.
  */

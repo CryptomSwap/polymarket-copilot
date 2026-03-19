@@ -723,11 +723,10 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
     }
     case "paper_trading_tick": {
       const { runPaperTradingTick } = await import("../paper-trading/engine");
-      // Use decision-recompute funder selection so the tick finds DecisionPolicySnapshot rows.
-      // This prevents paper admission from stalling when getFunderForRecompute() temporarily resolves to
-      // a funder that has recommendations but no decision snapshots.
-      const { getFunderForDecisionRecompute } = await import("../decision/recompute");
-      const funder = await getFunderForDecisionRecompute();
+      // Prefer credentials/wallet funder (same as stream-runtime) so paper candidate load aligns with
+      // runtime_automated submissions. Falls back to snapshot heuristic when no wallet funder.
+      const { getFunderForPaperTradingTick } = await import("../decision/recompute");
+      const funder = await getFunderForPaperTradingTick();
       await runPaperTradingTick(funder ?? undefined);
       break;
     }

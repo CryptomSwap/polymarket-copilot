@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getFunderForDecisionRecompute } from "@/lib/decision/recompute";
+import { getFunderForPaperTradingTick } from "@/lib/decision/recompute";
 import { runPaperTradingTick } from "@/lib/paper-trading/engine";
 
 export const dynamic = "force-dynamic";
@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/paper-trading/tick
  * Run one paper-trading tick: score live candidates, open paper trades when score >= threshold.
- * Uses same funder resolution as decision recompute; optional body { funderAddress } forces that funder (e.g. same as ensure-decision-snapshots).
+ * Uses wallet-aligned funder resolution (same as scheduled paper_trading_tick); optional body { funderAddress } overrides.
  */
 export async function POST(request: Request) {
   try {
@@ -18,7 +18,7 @@ export async function POST(request: Request) {
     } catch {
       funderOverride = undefined;
     }
-    const funder = await getFunderForDecisionRecompute(funderOverride);
+    const funder = await getFunderForPaperTradingTick(funderOverride);
     const result = await runPaperTradingTick(funder ?? undefined);
     return NextResponse.json(result);
   } catch (e) {

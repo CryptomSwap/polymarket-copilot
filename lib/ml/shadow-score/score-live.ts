@@ -30,22 +30,36 @@ function parseModelFromMetricsJson(metricsJson: string | null): LogisticRegressi
 /**
  * Load the latest ACTIVE or APPROVED shadow-trained model (modelType = logistic_regression_shadow).
  * Distinct from recommendation ML (getActiveOrApprovedModel in score-live.ts).
+ *
+ * Uses a small batch ordered by updatedAt so a corrupt metricsJson on the newest row does not
+ * hide an older still-eligible ACTIVE/APPROVED run (fail-closed on status; no TRAINED fallback).
  */
 export async function getActiveOrApprovedShadowModel(): Promise<{
   run: { id: string; featureSetName: string; targetLabel: string };
   model: LogisticRegressionModel;
 } | null> {
-  const run = await prisma.mlModelRun.findFirst({
+  const runs = await prisma.mlModelRun.findMany({
     where: { modelType: SHADOW_MODEL_TYPE, status: { in: ["ACTIVE", "APPROVED"] } },
     orderBy: { updatedAt: "desc" },
+    take: 25,
+    select: {
+      id: true,
+      featureSetName: true,
+      targetLabel: true,
+      metricsJson: true,
+    },
   });
-  if (!run?.metricsJson) return null;
-  const model = parseModelFromMetricsJson(run.metricsJson);
-  if (!model) return null;
-  return {
-    run: { id: run.id, featureSetName: run.featureSetName, targetLabel: run.targetLabel },
-    model,
-  };
+  for (const run of runs) {
+    if (!run.metricsJson) continue;
+    const model = parseModelFromMetricsJson(run.metricsJson);
+    if (model) {
+      return {
+        run: { id: run.id, featureSetName: run.featureSetName, targetLabel: run.targetLabel },
+        model,
+      };
+    }
+  }
+  return null;
 }
 
 /**

@@ -51,7 +51,10 @@
     "dump:truth-merge-fix-report": "npx tsx tools/create-truth-merge-fix-report.ts",
     "dump:user-truth-marker-audit-report": "npx tsx tools/create-user-truth-marker-audit-report.ts",
     "dump:exchange-truth-lifecycle-report": "npx tsx tools/create-exchange-truth-lifecycle-report.ts",
-    "dump:decision-time-blocker-report": "npx tsx tools/create-decision-time-blocker-report.ts"
+    "dump:decision-time-blocker-report": "npx tsx tools/create-decision-time-blocker-report.ts",
+    "dump:paper-trade-opening-report": "npx tsx tools/create-paper-trade-opening-report.ts",
+    "dump:shadow-model-activation-report": "npx tsx tools/create-shadow-model-activation-report.ts",
+    "dump:shadow-training-data-report": "npx tsx tools/create-shadow-training-data-report.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.7.0",

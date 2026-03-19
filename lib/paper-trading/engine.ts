@@ -311,6 +311,8 @@ export interface PaperTradingTickResult {
   }>;
   /** Bounded decision trace bundle for last tick (observability only). */
   decisionTraceBundle?: PaperDecisionTraceBundle;
+  /** Funder used to load recommendation-based paper candidates (audit: align with stream-runtime wallet). */
+  funderUsedForCandidateLoad?: string | null;
 }
 
 /**
@@ -341,17 +343,22 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
     topCandidateScores: [],
     scoredAfterRelaxation: 0,
     paperTradesCreatedFromRelaxation: 0,
+    funderUsedForCandidateLoad: overrides.funderUsedForCandidateLoad ?? null,
     ...overrides,
   });
 
   if (!config.enabled) {
-    return emptyResult({ enabled: false });
+    return emptyResult({ enabled: false, funderUsedForCandidateLoad: funderAddress ?? null });
   }
 
   const active = await getActiveOrApprovedShadowModel();
   if (!active) {
     const errMsg = "No ACTIVE or APPROVED shadow model. Train and activate a shadow model first.";
-    const result = emptyResult({ errors: [errMsg], enabled: true });
+    const result = emptyResult({
+      errors: [errMsg],
+      enabled: true,
+      funderUsedForCandidateLoad: funderAddress ?? null,
+    });
     await persistOpenTickState(null, result, errMsg);
     return result;
   }
@@ -388,6 +395,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
       const result = emptyResult({
         errors: [errMsg],
         enabled: true,
+        funderUsedForCandidateLoad: funder,
         loadDiagnostics: {
           recommendationsFound: 0,
           noDecisionSnapshot: 0,
@@ -946,6 +954,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
       relaxedOpenedTrades: paperTradesCreatedFromRelaxationCount,
       relaxedDueToConcentrationScored: relaxedDueToConcentrationScoredCount,
       relaxedDueToConcentrationOpened: relaxedDueToConcentrationOpenedCount,
+      funderUsedForCandidateLoad: funder,
       loadDiagnostics: {
         ...loadDiagnostics,
         relaxedConcentrationRejectedByCap,
@@ -1781,6 +1790,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
     relaxedOpenedTrades: totalPaperTradesCreatedFromRelaxationCount,
     relaxedDueToConcentrationScored: totalRelaxedDueToConcentrationScored,
     relaxedDueToConcentrationOpened: totalRelaxedDueToConcentrationOpened,
+    funderUsedForCandidateLoad: funder,
     perBotResults,
     botBudgets: budgetAllocatorEnabled ? botBudgetsApplied : undefined,
     decisionTraceBundle: {

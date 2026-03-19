@@ -87,7 +87,11 @@ export interface BuildShadowTrainingExamplesOptions {
   createdAfter?: Date;
   /** Only include candidates created on or before this date. */
   createdBefore?: Date;
-  /** If true, only candidates that have been evaluated (have outcomeClassification or markouts). */
+  /**
+   * If true (default), only ShadowCandidate rows with evaluatedAt != null.
+   * Evaluation is performed by evaluateShadowCandidates(); outcomeClassification may still be null
+   * when 24h markout prices are missing (labelGoodDecision stays null until classification is set).
+   */
   evaluatedOnly?: boolean;
 }
 
