@@ -86,6 +86,7 @@ export async function POST(request: NextRequest) {
       createdBefore?: string;
       evaluatedOnly?: boolean;
       dryRun?: boolean;
+      datasetCandidateSelection?: "sequential" | "prefer_missing_12h_label";
     } = {};
     try {
       const raw = await request.json();
@@ -103,13 +104,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid createdBefore date" }, { status: 400 });
     }
 
+    const envDefaultLimit = parseInt(process.env.SHADOW_DATASET_BUILD_JOB_LIMIT ?? "3000", 10);
+    const defaultLimit =
+      Number.isFinite(envDefaultLimit) && envDefaultLimit > 0 ? Math.min(envDefaultLimit, 50_000) : 3000;
+    const requestedLimit = body.limit ?? defaultLimit;
+    const limit = Math.min(50_000, Math.max(1, requestedLimit));
+    const envSel = (process.env.SHADOW_DATASET_CANDIDATE_SELECTION ?? "").toLowerCase().trim();
+    const datasetCandidateSelection =
+      body.datasetCandidateSelection === "sequential"
+        ? ("sequential" as const)
+        : body.datasetCandidateSelection === "prefer_missing_12h_label"
+          ? ("prefer_missing_12h_label" as const)
+          : envSel === "sequential"
+            ? ("sequential" as const)
+            : ("prefer_missing_12h_label" as const);
+
     const result = await persistShadowTrainingExamples({
       funderAddress: body.funderAddress,
-      limit: body.limit ?? 500,
+      limit,
       createdAfter,
       createdBefore,
       evaluatedOnly: body.evaluatedOnly !== false,
       dryRun: body.dryRun === true,
+      datasetCandidateSelection,
     });
 
     return NextResponse.json({

@@ -4,6 +4,7 @@
  */
 
 import { prisma } from "@/lib/db";
+import { getSnapshotPriceAtOrBefore } from "@/lib/polymarket/market-price-snapshot-lookup";
 import { markout, classify } from "./markout";
 import type { ShadowEvaluationSummary } from "./types";
 
@@ -17,20 +18,13 @@ function parseNum(s: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-async function getPriceAt(marketId: string, assetId: string, at: Date): Promise<number | null> {
-  const row = await prisma.marketPriceSnapshot.findFirst({
-    where: { marketId, assetId, capturedAt: { lte: at } },
-    orderBy: { capturedAt: "desc" },
-  });
-  if (!row) return null;
-  return parseNum(row.price);
-}
-
 export interface EvaluateShadowOptions {
   /** Min age (ms) of candidate before evaluating (default 25h so 24h markout is available). */
   minAgeMs?: number;
   /** Max candidates to evaluate in one run (default 100). */
   limit?: number;
+  /** Max candidates for short-horizon backfill pass (default 200). */
+  shortHorizonLimit?: number;
 }
 
 /**
@@ -42,9 +36,51 @@ export async function evaluateShadowCandidates(
 ): Promise<{ evaluated: number; errors: string[] }> {
   const minAgeMs = options.minAgeMs ?? 25 * 60 * 60 * 1000;
   const limit = options.limit ?? 100;
+  const shortHorizonLimit = options.shortHorizonLimit ?? 200;
   const cutoff = new Date(Date.now() - minAgeMs);
+  const cutoff6h = new Date(Date.now() - HORIZON_6H_MS);
   const errors: string[] = [];
   let evaluated = 0;
+
+  // Short-horizon truth backfill: persist markout1h/markout6h as soon as 6h data is mature.
+  // Keep evaluatedAt null so full 24h outcome classification still happens later via canonical path.
+  const shortHorizonCandidates = await prisma.shadowCandidate.findMany({
+    where: {
+      evaluatedAt: null,
+      createdAt: { lte: cutoff6h },
+      OR: [{ markout1h: null }, { markout6h: null }],
+    },
+    orderBy: { createdAt: "asc" },
+    take: shortHorizonLimit,
+  });
+  for (const c of shortHorizonCandidates) {
+    try {
+      const marketId = c.marketId ?? "";
+      const assetId = c.assetId;
+      const side = c.side;
+      const decisionAt = c.createdAt;
+      const price0Num = parseNum(c.intendedPrice);
+      const price0 = (await getSnapshotPriceAtOrBefore(marketId, assetId, decisionAt)) ?? price0Num ?? null;
+      if (price0 == null) continue;
+      const at1h = new Date(decisionAt.getTime() + HORIZON_1H_MS);
+      const at6h = new Date(decisionAt.getTime() + HORIZON_6H_MS);
+      const price1h = await getSnapshotPriceAtOrBefore(marketId, assetId, at1h);
+      const price6h = await getSnapshotPriceAtOrBefore(marketId, assetId, at6h);
+      const m1h = price1h != null ? markout(side, price0, price1h) : null;
+      const m6h = price6h != null ? markout(side, price0, price6h) : null;
+      const updateData: { markout1h?: string; markout6h?: string } = {};
+      if (c.markout1h == null && m1h != null) updateData.markout1h = String(m1h);
+      if (c.markout6h == null && m6h != null) updateData.markout6h = String(m6h);
+      if (Object.keys(updateData).length > 0) {
+        await prisma.shadowCandidate.update({
+          where: { id: c.id },
+          data: updateData,
+        });
+      }
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   const candidates = await prisma.shadowCandidate.findMany({
     where: { evaluatedAt: null, createdAt: { lte: cutoff } },
@@ -61,7 +97,7 @@ export async function evaluateShadowCandidates(
       const decisionAt = c.createdAt;
 
       const price0 =
-        (await getPriceAt(marketId, assetId, decisionAt)) ?? price0Num ?? null;
+        (await getSnapshotPriceAtOrBefore(marketId, assetId, decisionAt)) ?? price0Num ?? null;
       if (price0 == null) {
         await prisma.shadowCandidate.update({
           where: { id: c.id },
@@ -78,9 +114,9 @@ export async function evaluateShadowCandidates(
       const at6h = new Date(decisionAt.getTime() + HORIZON_6H_MS);
       const at24h = new Date(decisionAt.getTime() + HORIZON_24H_MS);
 
-      const price1h = await getPriceAt(marketId, assetId, at1h);
-      const price6h = await getPriceAt(marketId, assetId, at6h);
-      const price24h = await getPriceAt(marketId, assetId, at24h);
+      const price1h = await getSnapshotPriceAtOrBefore(marketId, assetId, at1h);
+      const price6h = await getSnapshotPriceAtOrBefore(marketId, assetId, at6h);
+      const price24h = await getSnapshotPriceAtOrBefore(marketId, assetId, at24h);
 
       const m1h = price1h != null ? markout(side, price0, price1h) : null;
       const m6h = price6h != null ? markout(side, price0, price6h) : null;

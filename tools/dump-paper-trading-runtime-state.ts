@@ -77,6 +77,11 @@ async function main(): Promise<void> {
       try {
         const r = JSON.parse(state.lastCloseTickResultJson) as Record<string, unknown>;
         lines.push("| closed | " + escapeMd(r.closed) + " |");
+        lines.push("| openTotalCount | " + escapeMd(r.openTotalCount) + " |");
+        lines.push("| dueCount | " + escapeMd(r.dueCount) + " |");
+        lines.push("| closedWithMarkout | " + escapeMd(r.closedWithMarkout) + " |");
+        lines.push("| closedWithoutMarkout | " + escapeMd(r.closedWithoutMarkout) + " |");
+        lines.push("| closeReasonCounts | " + escapeMd(JSON.stringify(r.closeReasonCounts)) + " |");
         lines.push("| errors | " + escapeMd(Array.isArray(r.errors) ? r.errors.length : r.errors) + " |");
       } catch {
         lines.push("| (result) | (parse error) |");

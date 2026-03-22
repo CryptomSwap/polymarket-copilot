@@ -2,6 +2,8 @@
  * ML feature flags and config. All new behavioral changes gated here; defaults preserve current behavior.
  */
 
+import { isPaperExplorationAllocatorEnabledViaEnv } from "@/lib/paper-trading/exploration-policy";
+
 function envBool(key: string, defaultValue: boolean): boolean {
   const raw = typeof process !== "undefined" ? process.env[key]?.trim().toLowerCase() : "";
   if (raw === "") return defaultValue;
@@ -15,7 +17,7 @@ export function enableMlMultiroleOutputs(): boolean {
 
 /** Paper-only: use blended exploration allocator instead of pure threshold. */
 export function enablePaperExplorationAllocatorV1(): boolean {
-  return envBool("ENABLE_PAPER_EXPLORATION_ALLOCATOR_V1", false);
+  return isPaperExplorationAllocatorEnabledViaEnv();
 }
 
 /** Run champion + challenger scoring and include in outputs when true. */

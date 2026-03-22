@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getActiveOrApprovedShadowModel } from "@/lib/ml/shadow-score";
 import { getPaperTradingConfig } from "@/lib/paper-trading/config";
+import { normalizeCloseTickResult } from "@/lib/paper-trading/normalize-close-tick-result";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +89,18 @@ export async function GET() {
     const lastTickRelaxedDropped_missingPriceContext = d && typeof d.relaxedDropped_missingPriceContext === "number" ? d.relaxedDropped_missingPriceContext : null;
     const lastTickRelaxedDropped_other = d && typeof d.relaxedDropped_other === "number" ? d.relaxedDropped_other : null;
     const lastTickRelaxedBuiltSuccessfully = d && typeof d.relaxedBuiltSuccessfully === "number" ? d.relaxedBuiltSuccessfully : null;
+
+    const closeNorm = normalizeCloseTickResult(lastCloseTickResult);
+    const lastCloseTickOpenTotalCount = closeNorm.openTotalCount;
+    const lastCloseTickDueCount = closeNorm.dueCount;
+    const lastCloseTickClosedCount = closeNorm.closed;
+    const lastCloseTickClosedWithMarkout = closeNorm.closedWithMarkout;
+    const lastCloseTickClosedWithoutMarkout = closeNorm.closedWithoutMarkout;
+    const lastCloseTickCloseReasonCounts = closeNorm.closeReasonCounts;
+    const lastCloseTickErrorSample = closeNorm.errorSample;
+    const lastCloseTickResultLegacyShape = closeNorm.legacyShape;
+    const lastCloseTickResultParseFailed = closeNorm.parseFailed;
+    const lastCloseTickErrorsTotal = closeNorm.errorsTotal;
 
     const perBotResults =
       r && typeof (r as Record<string, unknown>).perBotResults === "object" && (r as Record<string, unknown>).perBotResults !== null
@@ -219,6 +232,16 @@ export async function GET() {
       lastCloseTickAt: state?.lastCloseTickAt?.toISOString() ?? null,
       lastCloseTickResult: lastCloseTickResult,
       lastCloseTickError: state?.lastCloseTickError ?? null,
+      lastCloseTickOpenTotalCount,
+      lastCloseTickDueCount,
+      lastCloseTickClosedCount,
+      lastCloseTickClosedWithMarkout,
+      lastCloseTickClosedWithoutMarkout,
+      lastCloseTickCloseReasonCounts,
+      lastCloseTickErrorSample,
+      lastCloseTickResultLegacyShape,
+      lastCloseTickResultParseFailed,
+      lastCloseTickErrorsTotal,
       activeTargetLabel: active?.run.targetLabel ?? null,
       modelRunId: active?.run.id ?? null,
       tradeOpenRate24h: tradesCreated24h,

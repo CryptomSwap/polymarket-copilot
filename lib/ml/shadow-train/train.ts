@@ -13,11 +13,53 @@ import type { ShadowTargetLabel, TrainShadowOptions, TrainShadowResult } from ".
 /** Model type for shadow-trained runs; recommendation ML uses "logistic_regression". */
 export const SHADOW_MODEL_TYPE = "logistic_regression_shadow";
 
+function variance(values: number[]): number {
+  if (values.length <= 1) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const sq = values.reduce((a, b) => a + (b - mean) * (b - mean), 0);
+  return sq / (values.length - 1);
+}
+
+export function computeActiveFeatureIndices(
+  xTrain: number[][],
+  nearConstantVarianceThreshold: number = 1e-8
+): number[] {
+  const d = xTrain[0]?.length ?? 0;
+  const idxs: number[] = [];
+  for (let j = 0; j < d; j++) {
+    const col = xTrain.map((r) => r[j] ?? 0);
+    const v = variance(col);
+    if (v > nearConstantVarianceThreshold) idxs.push(j);
+  }
+  return idxs;
+}
+
+export function balancedClassWeights(yTrain: number[]): number[] {
+  const n = yTrain.length;
+  const pos = yTrain.filter((y) => y === 1).length;
+  const neg = n - pos;
+  if (n === 0 || pos === 0 || neg === 0) return new Array(n).fill(1);
+  const wPos = n / (2 * pos);
+  const wNeg = n / (2 * neg);
+  return yTrain.map((y) => (y === 1 ? wPos : wNeg));
+}
+
 export async function trainShadowModel(
   targetLabel: ShadowTargetLabel = "labelGoodDecision",
   options: TrainShadowOptions = {}
 ): Promise<TrainShadowResult> {
-  const { funderAddress, candidateSource, limit = 2000, createdAfter, createdBefore, trainRatio = 0.8, debug = false } = options;
+  const {
+    funderAddress,
+    candidateSource,
+    limit = 2000,
+    createdAfter,
+    createdBefore,
+    trainRatio = 0.8,
+    debug = false,
+    dropConstantFeatures = true,
+    nearConstantVarianceThreshold = 1e-8,
+    classWeighting = "balanced",
+  } = options;
 
   const filterWithoutLabel: {
     funderAddress?: string;
@@ -132,6 +174,12 @@ export async function trainShadowModel(
   const yTrain = trainRows.map((r) => (r[targetLabel] === true ? 1 : 0));
   const XVal = valRows.map((r) => toShadowFeatureVector(toInput(r)));
   const yVal = valRows.map((r) => (r[targetLabel] === true ? 1 : 0));
+  const activeFeatureIdxs = dropConstantFeatures ? computeActiveFeatureIndices(XTrain, nearConstantVarianceThreshold) : null;
+  const featureIndices = activeFeatureIdxs && activeFeatureIdxs.length > 0
+    ? activeFeatureIdxs
+    : SHADOW_FEATURE_NAMES.map((_, idx) => idx);
+  const featureNames = featureIndices.map((idx) => SHADOW_FEATURE_NAMES[idx] ?? `f${idx}`);
+  const classWeights = classWeighting === "balanced" ? balancedClassWeights(yTrain) : undefined;
 
   if (debug && XTrain.length > 0) {
     console.log("[train] feature names (same order as toShadowFeatureVector):", SHADOW_FEATURE_NAMES.join(", "));
@@ -144,11 +192,13 @@ export async function trainShadowModel(
     learningRate: 0.1,
     maxIter: 500,
     l2Lambda: 0.01,
+    featureIndices,
+    sampleWeights: classWeights,
   });
 
   const valProbas = predictBatchLogistic(model, XVal);
   const metrics = computeMetrics(valProbas, yVal);
-  const featureImportance = getLogisticFeatureImportance(model, SHADOW_FEATURE_NAMES);
+  const featureImportance = getLogisticFeatureImportance(model, featureNames);
 
   const trainedFrom = trainRows[0]?.createdAt ?? null;
   const trainedTo = trainRows[trainRows.length - 1]?.createdAt ?? null;
@@ -166,6 +216,13 @@ export async function trainShadowModel(
     intercept: model.intercept,
     means: model.means,
     stds: model.stds,
+    activeFeatureIdxs: model.activeFeatureIdxs ?? null,
+    droppedFeatureCount: SHADOW_FEATURE_NAMES.length - featureIndices.length,
+    classWeighting,
+    classBalance: {
+      trainPos: yTrain.filter((y) => y === 1).length,
+      trainNeg: yTrain.filter((y) => y === 0).length,
+    },
   });
 
   const run = await prisma.mlModelRun.create({
@@ -205,5 +262,10 @@ export async function trainShadowModel(
       rocAuc: metrics.rocAuc,
     },
     featureImportance,
+    trainingDiagnostics: {
+      classWeighting,
+      activeFeatureCount: featureIndices.length,
+      droppedFeatureCount: SHADOW_FEATURE_NAMES.length - featureIndices.length,
+    },
   };
 }

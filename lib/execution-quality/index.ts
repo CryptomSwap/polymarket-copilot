@@ -6,6 +6,10 @@
 export * from "./types";
 export { evaluateExecutionQuality } from "./evaluate";
 export {
+  evaluateExecutionQualityForRuntimeIntentRecord,
+  type RuntimeIntentAssetLiveState,
+} from "./runtime-intent-eq-snapshot";
+export {
   getExecutionQualityThresholds,
   setExecutionQualityThresholds,
   defaultExecutionQualityThresholds,

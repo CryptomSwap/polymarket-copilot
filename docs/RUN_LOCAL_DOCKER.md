@@ -35,6 +35,29 @@ If you change dependencies or want a clean image rebuild:
 .\scripts\dev-up.ps1 --rebuild
 ```
 
+## Next.js: `SyntaxError: Unexpected end of JSON input` (load-manifest / font manifest)
+
+Usually means `.next` has a **truncated or empty** manifest (common with **Docker bind mounts on Windows**).
+
+**If you use Compose `app` service:** `.next` is stored in the **`app_next_cache` volume**, not your repo folder. Reset it:
+
+```powershell
+docker compose stop app
+docker volume ls
+# Remove the volume named like: <compose_project>_app_next_cache
+docker volume rm YOUR_PROJECT_app_next_cache
+docker compose up -d app
+```
+
+Compose project name defaults to the directory name (e.g. `polymarket-copilot_app_next_cache`).
+
+**If you run `npm run dev` on the host (no Docker app):** delete the local cache and restart:
+
+```powershell
+Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue
+npm run dev
+```
+
 ## Inspect Logs
 
 ```powershell
@@ -95,4 +118,8 @@ docker compose exec worker npx tsx tools/cleanup-stale-job-runs.ts --apply
 - Compose uses `.env` for credentials/config, but it **overrides** `DATABASE_URL` inside containers using `DATABASE_URL_DOCKER`.
 - In the default “reuse external Postgres” mode, `DATABASE_URL_DOCKER` should point to `host.docker.internal:5432`.
 - In “compose-managed Postgres” mode, `DATABASE_URL_DOCKER` can point to `postgres:5432` (or use the default you prefer).
+
+## Docker disk usage (scheduled safe cleanup)
+
+To reclaim Docker **build cache / dangling images / stopped containers / unused networks** without touching the **Postgres data volume** or stopping running services, see **`docs/DOCKER_SAFE_CLEANUP.md`** (`scripts/docker-safe-cleanup.ps1`, `scripts/docker-disk-usage-report.ps1`).
 

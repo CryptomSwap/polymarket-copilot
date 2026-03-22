@@ -173,6 +173,9 @@ export function evaluateExecutionQuality(input: ExecutionQualityInput): Executio
 
   const tradable = qualityState !== "block";
 
+  const midPrice =
+    bestBid != null && bestAsk != null && bestAsk > bestBid ? (bestBid + bestAsk) / 2 : null;
+
   const snapshot = {
     evaluatedAt,
     qualityState,
@@ -181,6 +184,10 @@ export function evaluateExecutionQuality(input: ExecutionQualityInput): Executio
     warnings,
     spread: spread ?? null,
     spreadBps: spreadBps ?? null,
+    bestBid,
+    bestAsk,
+    midPrice,
+    intendedPrice: intendedPrice ?? null,
     depthSufficiency,
     quoteFreshnessState,
     estimatedSlippageBps: slippageBps ?? null,

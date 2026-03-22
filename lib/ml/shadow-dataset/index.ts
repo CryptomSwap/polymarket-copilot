@@ -15,4 +15,5 @@ export type {
   BuildShadowTrainingExamplesResult,
   PersistShadowTrainingExamplesOptions,
   PersistShadowTrainingExamplesResult,
+  DatasetCandidateSelectionMode,
 } from "./types";

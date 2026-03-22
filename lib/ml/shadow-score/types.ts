@@ -12,9 +12,19 @@ export interface ShadowScoreInput extends Omit<ShadowFeatureInput, "outcomeBlock
 }
 
 export interface ShadowScoreResult {
-  /** Probability from shadow-trained model (e.g. P(good decision)). */
+  /**
+   * Raw logistic probability from the shadow model (sigmoid(z)); unchanged semantics for audit / DB PaperTrade.score.
+   */
   shadowMlScore: number;
-  /** Band for operator display: "low" | "medium" | "high". */
+  /**
+   * Pre-sigmoid linear term z (logit scale before clipping inside sigmoid). Null if unavailable.
+   */
+  shadowMlLogit: number | null;
+  /**
+   * Paper-only temperature-scaled probability: sigmoid(z / T). Equals shadowMlScore when T=1 or calibration off.
+   */
+  shadowMlScoreCalibrated: number;
+  /** Band for operator display: "low" | "medium" | "high" (from raw shadowMlScore). */
   shadowMlScoreBand: "low" | "medium" | "high";
   /** Model run id used for this score. */
   modelId: string;

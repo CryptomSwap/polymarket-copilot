@@ -13,9 +13,18 @@ import type {
   PersistShadowTrainingExamplesOptions,
   PersistShadowTrainingExamplesResult,
 } from "./types";
+import { selectShadowCandidateIdsPreferMissing12hLabel } from "./select-candidates";
 import { subtypesFromDecisionSnapshotJson } from "@/lib/decision-calibration/subtypes";
 import type { DecisionSnapshotLike } from "@/lib/decision-calibration/subtypes";
 import { markout } from "@/lib/shadow-evaluation/markout";
+import {
+  computePathRegimeFeaturesFromPreDecisionPoints,
+  fetchSnapshotsForShadowRow,
+  filterPreDecisionPoints,
+  mergePathFeaturesIntoUpdate,
+  priceAtOrBefore,
+  type PathRegimeFeatures,
+} from "./path-features-from-snapshots";
 
 function parseNum(s: string | null | undefined): number | null {
   if (s == null || s === "") return null;
@@ -26,6 +35,20 @@ function parseNum(s: string | null | undefined): number | null {
 function toStr(n: number | null | undefined): string | null {
   if (n == null || !Number.isFinite(n)) return null;
   return String(n);
+}
+
+/**
+ * Markout-based good-decision label (short horizons):
+ * - favorable markout (>0): good if allowed, bad if blocked (missed opportunity)
+ * - unfavorable markout (<=0): good if blocked, bad if allowed
+ */
+export function deriveGoodDecisionLabelFromMarkout(
+  wasBlocked: boolean,
+  markoutValue: number | null
+): boolean | null {
+  if (markoutValue == null || !Number.isFinite(markoutValue)) return null;
+  const favorable = markoutValue > 0;
+  return wasBlocked ? !favorable : favorable;
 }
 
 /** Parse decisionSnapshotJson into a simple shape for feature extraction. */
@@ -350,6 +373,8 @@ export async function buildShadowTrainingExamples(
     createdAfter,
     createdBefore,
     evaluatedOnly = true,
+    datasetCandidateSelection = "sequential",
+    minAgeMsFor12hLabel,
   } = options;
 
   const where: {
@@ -364,6 +389,73 @@ export async function buildShadowTrainingExamples(
 
   const errors: string[] = [];
   const rows: ShadowTrainingRow[] = [];
+
+  if (datasetCandidateSelection === "prefer_missing_12h_label") {
+    const primaryIds = await selectShadowCandidateIdsPreferMissing12hLabel(prisma, {
+      limit,
+      funderAddress,
+      minAgeMs: minAgeMsFor12hLabel,
+    });
+    let orderedIds = [...primaryIds];
+    if (orderedIds.length < limit) {
+      const fill = await prisma.shadowCandidate.findMany({
+        where: {
+          ...where,
+          ...(orderedIds.length > 0 ? { id: { notIn: orderedIds } } : {}),
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: limit - orderedIds.length,
+        select: { id: true },
+      });
+      orderedIds = orderedIds.concat(fill.map((f) => f.id));
+    }
+    if (orderedIds.length === 0) {
+      return { rows, examplesSkipped: 0, errors };
+    }
+    const candidates = await prisma.shadowCandidate.findMany({
+      where: { id: { in: orderedIds } },
+    });
+    const byId = new Map(candidates.map((c) => [c.id, c]));
+    for (const id of orderedIds) {
+      const c = byId.get(id);
+      if (!c) continue;
+      try {
+        rows.push(
+          buildShadowTrainingRow({
+            id: c.id,
+            funderAddress: c.funderAddress,
+            recommendationId: c.recommendationId,
+            orderIntentId: c.orderIntentId,
+            assetId: c.assetId,
+            marketId: c.marketId,
+            side: c.side,
+            intendedPrice: c.intendedPrice,
+            intendedSize: c.intendedSize,
+            candidateSource: c.candidateSource,
+            createdAt: c.createdAt,
+            decisionSnapshotJson: c.decisionSnapshotJson,
+            executionPolicySnapshotJson: c.executionPolicySnapshotJson,
+            executionQualitySnapshotJson: c.executionQualitySnapshotJson,
+            portfolioRiskSnapshotJson: c.portfolioRiskSnapshotJson,
+            runtimeSafetySnapshotJson: c.runtimeSafetySnapshotJson,
+            wasBlocked: c.wasBlocked,
+            blockingReasons: c.blockingReasons,
+            wasSubmitted: c.wasSubmitted,
+            wasFilled: c.wasFilled,
+            evaluatedAt: c.evaluatedAt,
+            markout1h: c.markout1h,
+            markout6h: c.markout6h,
+            markout24h: c.markout24h,
+            outcomeClassification: c.outcomeClassification,
+          })
+        );
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    return { rows, examplesSkipped: 0, errors };
+  }
+
   const pageSize = Math.min(250, Math.max(50, Number(process.env.SHADOW_DATASET_BUILD_PAGE_SIZE ?? "200") || 200));
   let cursorId: string | null = null;
   while (rows.length < limit) {
@@ -430,75 +522,157 @@ export async function persistShadowTrainingExamples(
   let persisted = 0;
   if (!dryRun && rows.length > 0) {
     const HORIZON_12H_MS = 12 * 60 * 60 * 1000;
+    const snapshotMarketIdCache = new Map<string, string[]>();
     const writeBatchSize = Math.min(
       500,
       Math.max(50, Number(process.env.SHADOW_DATASET_PERSIST_BATCH_SIZE ?? "200") || 200)
     );
 
-    function valueAtOrBefore(
-      points: { capturedAt: Date; price: number }[],
-      at: Date
-    ): number | null {
-      if (points.length === 0) return null;
-      let lo = 0;
-      let hi = points.length - 1;
-      if (points[0].capturedAt > at) return null;
-      if (points[hi].capturedAt <= at) return points[hi].price;
-      while (lo < hi - 1) {
-        const mid = Math.floor((lo + hi) / 2);
-        if (points[mid].capturedAt <= at) lo = mid;
-        else hi = mid;
-      }
-      return points[lo].capturedAt <= at ? points[lo].price : null;
-    }
-
     for (let i = 0; i < rows.length; i += writeBatchSize) {
       const batch = rows.slice(i, i + writeBatchSize);
+      const uniqueMarketKeys = [...new Set(batch.map((r) => r.marketId).filter(Boolean) as string[])];
+      const syncedMarkets =
+        uniqueMarketKeys.length > 0
+          ? await prisma.syncedMarket.findMany({
+              where: {
+                OR: [{ id: { in: uniqueMarketKeys } }, { conditionId: { in: uniqueMarketKeys } }],
+              },
+              select: { id: true, conditionId: true, endDate: true },
+            })
+          : [];
+      const endDateByKey = new Map<string, Date>();
+      for (const m of syncedMarkets) {
+        if (m.endDate) {
+          const d = m.endDate instanceof Date ? m.endDate : new Date(m.endDate);
+          if (m.id) endDateByKey.set(m.id, d);
+          if (m.conditionId) endDateByKey.set(m.conditionId, d);
+        }
+      }
+      function marketEndFor(marketId: string | null): Date | null {
+        if (!marketId) return null;
+        return endDateByKey.get(marketId) ?? null;
+      }
+
       const existing = await prisma.mlShadowTrainingExample.findMany({
         where: { shadowCandidateId: { in: batch.map((r) => r.shadowCandidateId) } },
-        select: { shadowCandidateId: true },
+        select: {
+          id: true,
+          shadowCandidateId: true,
+          labelGoodDecision6h: true,
+          labelGoodDecision12h: true,
+          markout12h: true,
+          momentum1hBps: true,
+          momentum6hBps: true,
+          volatility1hBps: true,
+          volatility6hBps: true,
+          distanceFromMid: true,
+          timeToCloseHours: true,
+          liquidityTrend: true,
+        },
       });
-      const existingSet = new Set(existing.map((x: { shadowCandidateId: string }) => x.shadowCandidateId));
+      const existingByShadowCandidateId = new Map(
+        existing.map((x) => [x.shadowCandidateId, x])
+      );
       for (const row of batch) {
-        if (existingSet.has(row.shadowCandidateId)) continue;
         try {
+          const markout6hNum = parseNum(row.markout6h);
+          const labelGoodDecision6h = deriveGoodDecisionLabelFromMarkout(
+            row.wasBlocked,
+            markout6hNum
+          );
           let markout12h: string | null = null;
           let labelGoodDecision12h: boolean | null = null;
+          const existingRow = existingByShadowCandidateId.get(row.shadowCandidateId);
+          const existingMarkout12hNum = parseNum(existingRow?.markout12h ?? null);
+          if (existingMarkout12hNum != null) {
+            markout12h = String(existingMarkout12hNum);
+            labelGoodDecision12h = deriveGoodDecisionLabelFromMarkout(
+              row.wasBlocked,
+              existingMarkout12hNum
+            );
+          }
+
+          let pathFeatures: PathRegimeFeatures | null = null;
 
           if (row.marketId && row.assetId) {
             const decisionAt = row.createdAt;
             const at12h = new Date(decisionAt.getTime() + HORIZON_12H_MS);
-
-            const snapshots = await prisma.marketPriceSnapshot.findMany({
-              where: {
+            const fullPoints = await fetchSnapshotsForShadowRow(
+              prisma,
+              {
+                decisionAt,
+                forwardHorizonEnd: at12h,
                 marketId: row.marketId,
                 assetId: row.assetId,
-                capturedAt: { gte: new Date(decisionAt.getTime() - 60 * 60 * 1000), lte: at12h },
               },
-              orderBy: { capturedAt: "asc" },
-            });
+              { marketIdAliasCache: snapshotMarketIdCache }
+            );
 
-            const points = snapshots
-              .map((s) => {
-                const p = parseNum(s.price);
-                return p != null && p > 0
-                  ? { capturedAt: s.capturedAt, price: p }
-                  : null;
-              })
-              .filter((p): p is { capturedAt: Date; price: number } => p !== null);
-
-            if (points.length > 0) {
-              const price0 = valueAtOrBefore(points, decisionAt);
-              const price12h = valueAtOrBefore(points, at12h);
-              if (price0 != null && price12h != null && price0 > 0) {
+            if (fullPoints.length > 0) {
+              const price0 = priceAtOrBefore(fullPoints, decisionAt);
+              const price12h = priceAtOrBefore(fullPoints, at12h);
+              if (markout12h == null && price0 != null && price12h != null && price0 > 0) {
                 const m12 = markout(row.side, price0, price12h);
                 if (m12 != null && Number.isFinite(m12)) {
                   markout12h = String(m12);
-                  const favorable = m12 > 0;
-                  labelGoodDecision12h = row.wasBlocked ? !favorable : favorable;
+                  labelGoodDecision12h = deriveGoodDecisionLabelFromMarkout(row.wasBlocked, m12);
                 }
               }
+
+              const pre = filterPreDecisionPoints(fullPoints, decisionAt);
+              pathFeatures = computePathRegimeFeaturesFromPreDecisionPoints(pre, decisionAt, {
+                marketEndDate: marketEndFor(row.marketId),
+                intendedPriceFallback: parseNum(row.intendedPrice),
+              });
             }
+          }
+
+          if (existingRow) {
+            const updateData: {
+              labelGoodDecision6h?: boolean;
+              labelGoodDecision12h?: boolean;
+              markout12h?: string;
+              momentum1hBps?: string | null;
+              momentum6hBps?: string | null;
+              volatility1hBps?: string | null;
+              volatility6hBps?: string | null;
+              distanceFromMid?: string | null;
+              timeToCloseHours?: string | null;
+              liquidityTrend?: string | null;
+            } = {};
+            if (existingRow.labelGoodDecision6h == null && labelGoodDecision6h != null) {
+              updateData.labelGoodDecision6h = labelGoodDecision6h;
+            }
+            if (existingRow.labelGoodDecision12h == null && labelGoodDecision12h != null) {
+              updateData.labelGoodDecision12h = labelGoodDecision12h;
+            }
+            if (existingRow.markout12h == null && markout12h != null) {
+              updateData.markout12h = markout12h;
+            }
+            if (pathFeatures) {
+              Object.assign(
+                updateData,
+                mergePathFeaturesIntoUpdate(
+                  {
+                    momentum1hBps: existingRow.momentum1hBps,
+                    momentum6hBps: existingRow.momentum6hBps,
+                    volatility1hBps: existingRow.volatility1hBps,
+                    volatility6hBps: existingRow.volatility6hBps,
+                    distanceFromMid: existingRow.distanceFromMid,
+                    timeToCloseHours: existingRow.timeToCloseHours,
+                    liquidityTrend: existingRow.liquidityTrend,
+                  },
+                  pathFeatures
+                )
+              );
+            }
+            if (Object.keys(updateData).length > 0) {
+              await prisma.mlShadowTrainingExample.update({
+                where: { id: existingRow.id },
+                data: updateData,
+              });
+            }
+            continue;
           }
 
           // recommendationId is required for PaperTrade → MlShadowTrainingExample join (recommendationId, assetId, side).
@@ -554,10 +728,18 @@ export async function persistShadowTrainingExamples(
               wasSubmitted: row.wasSubmitted,
               wasFilled: row.wasFilled,
               labelGoodDecision: row.labelGoodDecision,
+              labelGoodDecision6h,
               labelGoodDecision12h,
               labelBadDecision: row.labelBadDecision,
               labelMissedOpportunity: row.labelMissedOpportunity,
               labelExecutionUnsafe: row.labelExecutionUnsafe,
+              momentum1hBps: pathFeatures?.momentum1hBps ?? null,
+              momentum6hBps: pathFeatures?.momentum6hBps ?? null,
+              volatility1hBps: pathFeatures?.volatility1hBps ?? null,
+              volatility6hBps: pathFeatures?.volatility6hBps ?? null,
+              distanceFromMid: pathFeatures?.distanceFromMid ?? null,
+              timeToCloseHours: pathFeatures?.timeToCloseHours ?? null,
+              liquidityTrend: pathFeatures?.liquidityTrend ?? null,
             },
           });
           persisted++;

@@ -97,7 +97,7 @@ import {
 } from "@/lib/runtime/risk/runtime-guardrails";
 import { evaluateExecutionPolicy } from "@/lib/execution-policy/evaluate";
 import type { ExecutionPolicyInput } from "@/lib/execution-policy/types";
-import { evaluateExecutionQuality } from "@/lib/execution-quality";
+import { evaluateExecutionQualityForRuntimeIntentRecord } from "@/lib/execution-quality";
 import {
   evaluateRuntimeSafety,
   updateRuntimeSafetyState,
@@ -968,10 +968,23 @@ export class StreamRuntime {
         if (result.reasons.some((r) => r.includes("silence"))) {
           this.deps?.latencyMonitor?.recordStreamSilencePeriod();
         }
-        if (result.triggerKillSwitch && result.killSwitchReason && this.deps?.killSwitch) {
+        const paperRuntime = getRuntimeConfig().mode === "paper";
+        const skipKillForPaperUserSilence =
+          paperRuntime && result.killSwitchReason === "user_data_silence_with_working_orders";
+        if (
+          result.triggerKillSwitch &&
+          result.killSwitchReason &&
+          this.deps?.killSwitch &&
+          !skipKillForPaperUserSilence
+        ) {
           this.deps.killSwitch.setGlobalStop(`stream_watchdog: ${result.killSwitchReason}`);
           this.lastWatchdogKillSwitchTriggered = true;
           this.deps.diagnostics.log("warn", "Stream watchdog triggered kill switch", {
+            reason: result.killSwitchReason,
+            reasons: result.reasons,
+          });
+        } else if (skipKillForPaperUserSilence) {
+          this.deps.diagnostics.log("warn", "Stream watchdog skipped kill switch (paper mode: user_data_silence_with_working_orders)", {
             reason: result.killSwitchReason,
             reasons: result.reasons,
           });
@@ -2104,6 +2117,14 @@ export class StreamRuntime {
           depth?: { bidTopSize?: number | null; askTopSize?: number | null };
         } | null | undefined;
         const healthLastMarketEventAt = asset?.health?.lastMarketEventAt;
+        const eqRecordGuardrails = evaluateExecutionQualityForRuntimeIntentRecord({
+          assetId: payload.assetId,
+          marketId: payload.marketId,
+          side: payload.side,
+          intendedPrice: payload.limitPrice,
+          intendedSize: payload.size,
+          assetLiveState: context.assetLiveState,
+        });
         diagnostics.log("debug", "ShadowCandidate blocked (diagnostics)", {
           guardrailVerdict: result.verdict,
           blockingReasonCodes: blockingReasons,
@@ -2169,6 +2190,7 @@ export class StreamRuntime {
             terminalModule: "lib/runtime/risk/runtime-guardrails.ts",
             terminalFunction: "DefaultRuntimeGuardrails.evaluate",
           }),
+          executionQualitySnapshotJson: eqRecordGuardrails.snapshotJson,
           runtimeSafetySnapshotJson: JSON.stringify({
             state: runtimeSafetyNow.state,
             blockingReasons: runtimeSafetyNow.blockingReasons,
@@ -2236,27 +2258,14 @@ export class StreamRuntime {
         quote?: { bestBid?: number | null; bestAsk?: number | null; spreadBps?: number | null; updatedAt?: Date | null };
         depth?: { bidTopSize?: number | null; askTopSize?: number | null };
       } | null | undefined;
-      const eqResult =
-        assetLiveState != null
-          ? evaluateExecutionQuality({
-              assetId: payload.assetId,
-              marketId: payload.marketId,
-              side: payload.side as "BUY" | "SELL",
-              intendedPrice: payload.limitPrice,
-              intendedSize: payload.size,
-              bestBid: assetLiveState.quote?.bestBid ?? null,
-              bestAsk: assetLiveState.quote?.bestAsk ?? null,
-              bidDepth: assetLiveState.depth?.bidTopSize ?? null,
-              askDepth: assetLiveState.depth?.askTopSize ?? null,
-              spreadBps: assetLiveState.quote?.spreadBps ?? undefined,
-              quoteAgeMs:
-                assetLiveState.quote?.updatedAt != null
-                  ? Date.now() - new Date(assetLiveState.quote.updatedAt).getTime()
-                  : undefined,
-              liquidityScore: assetLiveState.liquidity?.qualityScore ?? undefined,
-              isTradable: assetLiveState.liquidity?.isTradable ?? undefined,
-            })
-          : null;
+      const eqRecord = evaluateExecutionQualityForRuntimeIntentRecord({
+        assetId: payload.assetId,
+        marketId: payload.marketId,
+        side: payload.side,
+        intendedPrice: payload.limitPrice,
+        intendedSize: payload.size,
+        assetLiveState,
+      });
       const portfolioRisk = portfolioRiskNow;
       const exposureInput: ExecutionPolicyInput["exposure"] = {
         grossExposure: riskState.grossExposure,
@@ -2310,13 +2319,13 @@ export class StreamRuntime {
               }
           : undefined;
       const policyExecutionQuality =
-        eqResult != null
-          ? paperMode && eqResult.qualityState === "block"
-            ? { qualityState: "good" as const, blockingReasons: [] as string[], warnings: eqResult.warnings ?? [] }
+        assetLiveState != null
+          ? paperMode && eqRecord.qualityState === "block"
+            ? { qualityState: "good" as const, blockingReasons: [] as string[], warnings: eqRecord.warnings ?? [] }
             : {
-                qualityState: eqResult.qualityState,
-                blockingReasons: eqResult.blockingReasons,
-                warnings: eqResult.warnings,
+                qualityState: eqRecord.qualityState,
+                blockingReasons: eqRecord.blockingReasons,
+                warnings: eqRecord.warnings,
               }
           : undefined;
       let operationalReconciliationDriftRaw = !reconciliationFresh;
@@ -2392,7 +2401,7 @@ export class StreamRuntime {
             terminalFunction: "evaluateExecutionPolicy",
           }),
           executionPolicySnapshotJson: policyResult.snapshotJson,
-          executionQualitySnapshotJson: eqResult?.snapshotJson ?? null,
+          executionQualitySnapshotJson: eqRecord.snapshotJson,
           portfolioRiskSnapshotJson: concentrationInputSnapshotJson,
           runtimeSafetySnapshotJson: JSON.stringify({
             state: runtimeSafetyNow.state,
@@ -2479,7 +2488,7 @@ export class StreamRuntime {
           terminalFunction: "evaluateExecutionPolicy",
         }),
         executionPolicySnapshotJson: policyResult.snapshotJson,
-        executionQualitySnapshotJson: eqResult?.snapshotJson ?? null,
+        executionQualitySnapshotJson: eqRecord.snapshotJson,
         portfolioRiskSnapshotJson: concentrationInputSnapshotJson,
         runtimeSafetySnapshotJson: JSON.stringify({
           state: runtimeSafetyNow.state,

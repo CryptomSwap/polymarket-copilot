@@ -20,10 +20,13 @@ export const JOB_NAMES = [
   "shadow_evaluation",
   "shadow_analysis",
   "ml_shadow_dataset_build",
+  "ml_shadow_path_feature_backfill",
   "paper_trading_tick",
   "paper_trading_close_due",
   "policy_refresh_pending",
   "ml_shadow_retrain",
+  "self_improving_paper_loop",
+  "ml_shadow_bootstrap_activate",
   "ml_shadow_promote",
   "paper_config_optimize",
   "self_improvement_rollback_guard",
@@ -52,16 +55,42 @@ export const JOB_INTERVALS_MS: Record<JobName, number> = {
   shadow_evaluation: 6 * 60 * 60 * 1000,
   shadow_analysis: 6 * 60 * 60 * 1000,
   ml_shadow_dataset_build: 6 * 60 * 60 * 1000,
+  ml_shadow_path_feature_backfill: 12 * 60 * 60 * 1000,
   paper_trading_tick: 5 * 60 * 1000,
   paper_trading_close_due: 60 * 60 * 1000,
   /** Debounced signal/rec/snapshot refresh after BehaviorFlag changes (~1 funder per tick, max 4). */
   policy_refresh_pending: 90 * 1000,
   ml_shadow_retrain: 24 * 60 * 60 * 1000,
+  /** Weekly full chain: eval → dataset → path backfill → retrain → bootstrap → promote → rollback (see runSelfImprovingPaperLoopJob). */
+  self_improving_paper_loop: 7 * 24 * 60 * 60 * 1000,
+  ml_shadow_bootstrap_activate: 24 * 60 * 60 * 1000,
   ml_shadow_promote: 24 * 60 * 60 * 1000,
   paper_config_optimize: 24 * 60 * 60 * 1000,
   self_improvement_rollback_guard: 6 * 60 * 60 * 1000,
   self_improvement_status_report: 6 * 60 * 60 * 1000,
 };
+
+const SHADOW_EVAL_MIN_AGE_MS_DEFAULT = 25 * 60 * 60 * 1000;
+const SHADOW_EVAL_LIMIT_DEFAULT = 100;
+const SHADOW_EVAL_LIMIT_CAP = 5000;
+const SHADOW_EVAL_MIN_AGE_CAP_MS = 365 * 24 * 60 * 60 * 1000;
+
+/** Optional shadow batch tuning. Invalid values ignored → safe defaults (fail-closed). */
+function shadowEvalMinAgeMsFromEnv(): number {
+  const raw = process.env.SHADOW_EVAL_MIN_AGE_MS;
+  if (raw == null || String(raw).trim() === "") return SHADOW_EVAL_MIN_AGE_MS_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return SHADOW_EVAL_MIN_AGE_MS_DEFAULT;
+  return Math.min(Math.floor(n), SHADOW_EVAL_MIN_AGE_CAP_MS);
+}
+
+function shadowEvalLimitFromEnv(): number {
+  const raw = process.env.SHADOW_EVAL_LIMIT;
+  if (raw == null || String(raw).trim() === "") return SHADOW_EVAL_LIMIT_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return SHADOW_EVAL_LIMIT_DEFAULT;
+  return Math.min(Math.floor(n), SHADOW_EVAL_LIMIT_CAP);
+}
 
 export interface RunJobResult {
   runId: string;
@@ -208,10 +237,13 @@ export const JOB_MAX_DURATION_MS: Record<JobName, number> = {
   shadow_evaluation: 20 * 60 * 1000,
   shadow_analysis: 20 * 60 * 1000,
   ml_shadow_dataset_build: 30 * 60 * 1000,
+  ml_shadow_path_feature_backfill: 45 * 60 * 1000,
   paper_trading_tick: 3 * 60 * 1000,
   paper_trading_close_due: 10 * 60 * 1000,
   policy_refresh_pending: 3 * 60 * 1000,
   ml_shadow_retrain: 45 * 60 * 1000,
+  self_improving_paper_loop: 120 * 60 * 1000,
+  ml_shadow_bootstrap_activate: 30 * 60 * 1000,
   ml_shadow_promote: 30 * 60 * 1000,
   paper_config_optimize: 20 * 60 * 1000,
   self_improvement_rollback_guard: 10 * 60 * 1000,
@@ -708,7 +740,10 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
     }
     case "shadow_evaluation": {
       const { evaluateShadowCandidates } = await import("../shadow-evaluation");
-      await evaluateShadowCandidates({ minAgeMs: 25 * 60 * 60 * 1000, limit: 100 });
+      await evaluateShadowCandidates({
+        minAgeMs: shadowEvalMinAgeMsFromEnv(),
+        limit: shadowEvalLimitFromEnv(),
+      });
       break;
     }
     case "shadow_analysis": {
@@ -718,7 +753,26 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
     }
     case "ml_shadow_dataset_build": {
       const { persistShadowTrainingExamples } = await import("../ml/shadow-dataset");
-      await persistShadowTrainingExamples({ limit: 500, evaluatedOnly: true });
+      const { getActiveOrApprovedShadowModel } = await import("../ml/shadow-score");
+      const rawLimit = parseInt(process.env.SHADOW_DATASET_BUILD_JOB_LIMIT ?? "3000", 10);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 50_000) : 3000;
+      const champion = await getActiveOrApprovedShadowModel();
+      const coldStart = !champion;
+      const allowUnevaluated = process.env.SELF_IMPROVE_BOOTSTRAP_ALLOW_UNEVALUATED !== "false";
+      const evaluatedOnly = coldStart && allowUnevaluated ? false : true;
+      const sel = (process.env.SHADOW_DATASET_CANDIDATE_SELECTION ?? "").toLowerCase().trim();
+      const datasetCandidateSelection =
+        sel === "sequential" ? ("sequential" as const) : ("prefer_missing_12h_label" as const);
+      await persistShadowTrainingExamples({
+        limit,
+        evaluatedOnly,
+        datasetCandidateSelection,
+      });
+      break;
+    }
+    case "ml_shadow_path_feature_backfill": {
+      const { runShadowPathFeatureBackfillJob } = await import("./self-improvement-loop");
+      await runShadowPathFeatureBackfillJob();
       break;
     }
     case "paper_trading_tick": {
@@ -750,9 +804,25 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
       break;
     }
     case "ml_shadow_retrain": {
-      const { runShadowDatasetRefreshJob, runShadowRetrainJob } = await import("./self-improvement-loop");
+      const {
+        runShadowDatasetRefreshJob,
+        runShadowPathFeatureBackfillJob,
+        runShadowRetrainJob,
+      } = await import("./self-improvement-loop");
+      /** Explicit order: fresh examples → path slots → train (fail-closed on ACTIVE/APPROVED parse for scoring remains separate). */
       await runShadowDatasetRefreshJob();
+      await runShadowPathFeatureBackfillJob();
       await runShadowRetrainJob();
+      break;
+    }
+    case "self_improving_paper_loop": {
+      const { runSelfImprovingPaperLoopJob } = await import("./self-improvement-loop");
+      await runSelfImprovingPaperLoopJob();
+      break;
+    }
+    case "ml_shadow_bootstrap_activate": {
+      const { runShadowBootstrapActivationJob } = await import("./self-improvement-loop");
+      await runShadowBootstrapActivationJob();
       break;
     }
     case "ml_shadow_promote": {

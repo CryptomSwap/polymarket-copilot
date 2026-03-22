@@ -43,6 +43,8 @@ export interface LogisticRegressionParams {
   maxIter?: number;
   l2Lambda?: number;
   tol?: number;
+  sampleWeights?: number[];
+  featureIndices?: number[];
 }
 
 export interface LogisticRegressionModel {
@@ -51,6 +53,7 @@ export interface LogisticRegressionModel {
   means: number[];
   stds: number[];
   featureNames?: string[];
+  activeFeatureIdxs?: number[];
 }
 
 /**
@@ -65,8 +68,12 @@ export function trainLogisticRegression(
   const maxIter = params.maxIter ?? 500;
   const l2Lambda = params.l2Lambda ?? 0.01;
   const tol = params.tol ?? 1e-6;
-
   const n = X.length;
+  const sampleWeights = params.sampleWeights;
+  const weightSum = sampleWeights && sampleWeights.length === y.length
+    ? sampleWeights.reduce((a, b) => a + (Number.isFinite(b) ? Math.max(0, b) : 0), 0)
+    : n;
+  const norm = weightSum > 0 ? weightSum : Math.max(1, n);
   const numFeatures = X[0]?.length ?? 0;
   const d = numFeatures + 1;
   const XCopy = X.map((row) => [1, ...row]);
@@ -86,9 +93,12 @@ export function trainLogisticRegression(
       let g = 0;
       for (let i = 0; i < n; i++) {
         const pred = sigmoid(w.reduce((s, wj, k) => s + wj * (XCopy[i][k] ?? 0), 0));
-        g += (pred - y[i]) * (XCopy[i][j] ?? 0);
+        const wi = sampleWeights && sampleWeights.length === y.length
+          ? (Number.isFinite(sampleWeights[i]) ? Math.max(0, sampleWeights[i] as number) : 0)
+          : 1;
+        g += wi * (pred - y[i]) * (XCopy[i][j] ?? 0);
       }
-      g /= n;
+      g /= norm;
       if (j > 0) g += l2Lambda * w[j];
       gradNorm += g * g;
       w[j] -= learningRate * g;
@@ -101,7 +111,29 @@ export function trainLogisticRegression(
     intercept: w[0],
     means,
     stds,
+    activeFeatureIdxs: params.featureIndices,
   };
+}
+
+/**
+ * Linear score z before sigmoid: sigmoid(z) === predictProbaLogistic(model, row) (up to float error).
+ * Useful for diagnosing saturation (very large |z| ⇒ probability near 0 or 1).
+ */
+export function logisticLinearTerm(
+  model: LogisticRegressionModel,
+  row: number[],
+  options?: { alreadyNormalized?: boolean }
+): number {
+  const projected = Array.isArray(model.activeFeatureIdxs)
+    ? model.activeFeatureIdxs.map((idx) => row[idx] ?? 0)
+    : row;
+  const normalized = options?.alreadyNormalized
+    ? projected
+    : projected.map((v, j) => {
+        const std = model.stds[j];
+        return std > 1e-8 ? (v - model.means[j]) / std : v - model.means[j];
+      });
+  return model.intercept + normalized.reduce((s, v, j) => s + (model.coefficients[j] ?? 0) * v, 0);
 }
 
 /**
@@ -112,13 +144,7 @@ export function predictProbaLogistic(
   row: number[],
   options?: { alreadyNormalized?: boolean }
 ): number {
-  const normalized = options?.alreadyNormalized
-    ? row
-    : row.map((v, j) => {
-        const std = model.stds[j];
-        return std > 1e-8 ? (v - model.means[j]) / std : v - model.means[j];
-      });
-  const z = model.intercept + normalized.reduce((s, v, j) => s + (model.coefficients[j] ?? 0) * v, 0);
+  const z = logisticLinearTerm(model, row, options);
   return sigmoid(z);
 }
 

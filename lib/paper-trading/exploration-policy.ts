@@ -14,13 +14,21 @@ export type { ExplorationPolicyMode, ExplorationAllocationBucket, ExplorationAll
 
 const DEFAULT_MODE: ExplorationPolicyMode = "legacy_threshold_only";
 
+/** True when blended paper exploration allocator is enabled via env (paper-only). */
+export function isPaperExplorationAllocatorEnabledViaEnv(): boolean {
+  const v1 =
+    typeof process !== "undefined" ? process.env.ENABLE_PAPER_EXPLORATION_ALLOCATOR_V1?.trim().toLowerCase() : "";
+  const paper =
+    typeof process !== "undefined" ? process.env.PAPER_EXPLORATION_ENABLED?.trim().toLowerCase() : "";
+  return v1 === "1" || v1 === "true" || paper === "1" || paper === "true";
+}
+
 /**
  * Resolve effective exploration mode (e.g. from env or config). Default preserves legacy.
  */
 export function getExplorationPolicyMode(override?: ExplorationPolicyMode): ExplorationPolicyMode {
   if (override) return override;
-  const env = typeof process !== "undefined" ? process.env.ENABLE_PAPER_EXPLORATION_ALLOCATOR_V1?.trim().toLowerCase() : "";
-  if (env === "1" || env === "true") return "blended_allocator_v1";
+  if (isPaperExplorationAllocatorEnabledViaEnv()) return "blended_allocator_v1";
   return DEFAULT_MODE;
 }
 

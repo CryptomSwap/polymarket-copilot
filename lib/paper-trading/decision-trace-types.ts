@@ -19,6 +19,8 @@ export type PaperDecisionRejectReasonCode =
   | "max_open_per_category"
   | "missing_shadow_score"
   | "candidate_filter"
+  | "spread_guard"
+  | "slippage_guard"
   | "unknown_rejection";
 
 export type PaperDecisionFinalDisposition = "admitted" | "rejected";
@@ -44,6 +46,15 @@ export interface PaperDecisionTraceEntry {
   minScore: number | null;
   explorationMinScore?: number | null;
 
+  /**
+   * Score used for threshold/exploration gating (raw or calibrated per `admissionUsesCalibrated`).
+   * `championScore` is the champion model probability passed to challenger compare (raw); may differ when paper uses calibrated admission.
+   */
+  admissionScore?: number | null;
+  shadowMlScoreRaw?: number | null;
+  shadowMlScoreCalibrated?: number | null;
+  admissionUsesCalibrated?: boolean;
+
   thresholdEligible: boolean;
   explorationEligible: boolean;
   explorationUsed: boolean;
@@ -56,6 +67,22 @@ export interface PaperDecisionTraceEntry {
   rejectReasonCode?: PaperDecisionRejectReasonCode | null;
   rejectedBy?: PaperDecisionRejectReasonCode[];
   dedupeKey?: string | null;
+
+  /** Scalar market context at trace time (from shadow input / execution-quality snapshot when available). */
+  spreadBps: number | null;
+  estimatedSlippageBps: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midPrice: number | null;
+  priceUsedForDecision: number | null;
+
+  /** Paper-only daily-cap overflow routing (set only when overflow was attempted for this candidate). */
+  originalBotKey?: string | null;
+  finalBotKey?: string | null;
+  overflowAttempted?: boolean;
+  overflowTriedBotKeys?: string[];
+  overflowSucceeded?: boolean;
+  overflowTerminalReason?: string | null;
 }
 
 /** Per-bot aggregates for the last tick (exact counts, not from capped traces). */
@@ -70,6 +97,8 @@ export interface PaperDecisionTracePerBotAggregate {
   rejectedByCooldown: number;
   rejectedByDedupe: number;
   rejectedByCaps: number;
+  rejectedBySpreadGuard: number;
+  rejectedBySlippageGuard: number;
   rejectedOther: number;
   explorationEligible: number;
   explorationUsed: number;

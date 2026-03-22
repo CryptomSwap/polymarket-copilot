@@ -47,6 +47,10 @@ export interface ShadowFeatureInput {
   intendedSize?: string | null;
   recommendationPresent?: boolean;
   side?: string | null;
+  /** Quote snapshot from execution-quality persistence; not part of SHADOW_FEATURE_NAMES / toShadowFeatureVector. */
+  quoteBestBid?: number | null;
+  quoteBestAsk?: number | null;
+  quoteMidPrice?: number | null;
   outcomeBlockedVsAllowedVsSubmitted?: "blocked" | "allowed" | "submitted" | null;
   // Historical-only (offline dataset)
   momentum1hBps?: string | null;

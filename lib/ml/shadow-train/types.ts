@@ -22,6 +22,12 @@ export interface TrainShadowOptions {
   trainRatio?: number;
   /** If true, log feature names and first 3 train vectors. */
   debug?: boolean;
+  /** Drop constant/near-constant training columns before fitting. */
+  dropConstantFeatures?: boolean;
+  /** Variance threshold used when dropping near-constant columns. */
+  nearConstantVarianceThreshold?: number;
+  /** Balanced class weighting for imbalanced bootstrap labels. */
+  classWeighting?: "none" | "balanced";
 }
 
 export interface TrainShadowResult {
@@ -43,5 +49,10 @@ export interface TrainShadowResult {
     rocAuc: number;
   };
   featureImportance?: Array<{ name: string; coefficient: number; absCoefficient: number }>;
+  trainingDiagnostics?: {
+    classWeighting: "none" | "balanced";
+    activeFeatureCount: number;
+    droppedFeatureCount: number;
+  };
   error?: string;
 }

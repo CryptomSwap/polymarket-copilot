@@ -4,9 +4,12 @@
  */
 
 import { prisma } from "@/lib/db";
-import { predictProbaLogistic, type LogisticRegressionModel } from "@/lib/ml/baseline";
+import { logisticLinearTerm, predictProbaLogistic, type LogisticRegressionModel } from "@/lib/ml/baseline";
 import { toShadowFeatureVector, type ShadowFeatureInput } from "@/lib/ml/shadow-train/features";
 import type { ShadowScoreInput, ShadowScoreResult } from "./types";
+import { scoreBandFromShadowProba } from "@/lib/paper-trading/paper-score-band";
+import { getPaperTradingConfig } from "@/lib/paper-trading/config";
+import { applyPaperShadowLogitTemperature } from "@/lib/paper-trading/paper-shadow-logit-calibration";
 
 const SHADOW_MODEL_TYPE = "logistic_regression_shadow";
 
@@ -18,10 +21,11 @@ function parseModelFromMetricsJson(metricsJson: string | null): LogisticRegressi
     const intercept = parsed.intercept as number | undefined;
     const means = parsed.means as number[] | undefined;
     const stds = parsed.stds as number[] | undefined;
+    const activeFeatureIdxs = parsed.activeFeatureIdxs as number[] | undefined;
     if (!Array.isArray(coef) || typeof intercept !== "number" || !Array.isArray(means) || !Array.isArray(stds)) {
       return null;
     }
-    return { coefficients: coef, intercept, means, stds };
+    return { coefficients: coef, intercept, means, stds, activeFeatureIdxs };
   } catch {
     return null;
   }
@@ -92,9 +96,16 @@ export async function scoreShadowCandidate(input: ShadowScoreInput): Promise<{
   };
   const vec = toShadowFeatureVector(featureInput);
   const proba = predictProbaLogistic(active.model, vec);
+  const z = logisticLinearTerm(active.model, vec);
+  const shadowMlLogit = Number.isFinite(z) ? z : null;
 
-  const band: "low" | "medium" | "high" =
-    proba >= 0.6 ? "high" : proba >= 0.4 ? "medium" : "low";
+  const paperCfg = getPaperTradingConfig();
+  const shadowMlScoreCalibrated = applyPaperShadowLogitTemperature(
+    proba,
+    paperCfg.paperShadowLogitTemperature
+  );
+
+  const band = scoreBandFromShadowProba(proba);
 
   const warnings = buildFeatureWarnings(input);
 
@@ -102,6 +113,8 @@ export async function scoreShadowCandidate(input: ShadowScoreInput): Promise<{
     success: true,
     result: {
       shadowMlScore: proba,
+      shadowMlLogit,
+      shadowMlScoreCalibrated,
       shadowMlScoreBand: band,
       modelId: active.run.id,
       modelFeatureSet: active.run.featureSetName,

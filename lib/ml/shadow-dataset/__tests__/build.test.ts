@@ -3,7 +3,9 @@
  * Deterministic; no DB required for buildShadowTrainingRow tests.
  */
 
-import { buildShadowTrainingRow } from "../build";
+import { buildShadowTrainingRow, deriveGoodDecisionLabelFromMarkout } from "../build";
+import * as fs from "fs";
+import * as path from "path";
 
 function check(cond: boolean, msg: string): void {
   if (!cond) throw new Error(`FAIL: ${msg}`);
@@ -250,6 +252,32 @@ function run(): void {
     });
     check(row.candidateSource === "runtime_automated", "candidateSource explicit");
     check(row.shadowCandidateId === "sc-src", "shadowCandidateId links to ShadowCandidate");
+  }
+
+  console.log("\n--- 7. Short-horizon label derivation: 6h/12h logic is explicit and isolated ---");
+  {
+    check(deriveGoodDecisionLabelFromMarkout(false, 0.05) === true, "allowed + favorable -> good");
+    check(deriveGoodDecisionLabelFromMarkout(false, -0.05) === false, "allowed + unfavorable -> bad");
+    check(deriveGoodDecisionLabelFromMarkout(true, 0.05) === false, "blocked + favorable -> bad (missed opportunity)");
+    check(deriveGoodDecisionLabelFromMarkout(true, -0.05) === true, "blocked + unfavorable -> good");
+    check(deriveGoodDecisionLabelFromMarkout(true, null) === null, "null markout -> null label");
+  }
+
+  console.log("\n--- 8. No contamination across horizons ---");
+  {
+    const label6h = deriveGoodDecisionLabelFromMarkout(false, 0.02);
+    const label12h = deriveGoodDecisionLabelFromMarkout(false, -0.02);
+    check(label6h === true, "6h favorable -> true");
+    check(label12h === false, "12h unfavorable -> false");
+    check(label6h !== label12h, "horizons can differ; labels must be independently derived");
+  }
+
+  console.log("\n--- 9. Snapshot source mapping supports marketId/conditionId mismatch ---");
+  {
+    const src = fs.readFileSync(path.resolve(__dirname, "../build.ts"), "utf8");
+    check(src.includes("resolveSnapshotMarketIds"), "dataset builder has market-id resolver");
+    check(src.includes("conditionId"), "dataset resolver checks SyncedMarket.conditionId");
+    check(src.includes("marketId: { in: resolvedMarketIds }"), "12h snapshot query uses resolved id set");
   }
 
   console.log("\n--- All shadow dataset build tests passed ---");

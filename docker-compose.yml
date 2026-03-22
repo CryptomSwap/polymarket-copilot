@@ -39,6 +39,9 @@ services:
     volumes:
       - ./:/app
       - /app/node_modules
+      # Keep .next inside a Docker volume (not the Windows bind mount) to avoid empty/corrupt
+      # Next.js manifest JSON (e.g. next-font-manifest) from file-sync / interrupted dev builds.
+      - app_next_cache:/app/.next
     restart: unless-stopped
 
   worker:
@@ -60,4 +63,5 @@ services:
 
 volumes:
   polymarket_postgres_data:
+  app_next_cache:
 

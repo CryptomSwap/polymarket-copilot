@@ -80,6 +80,9 @@ export interface ShadowTrainingRow {
   labelExecutionUnsafe: boolean | null;
 }
 
+/** How to choose which ShadowCandidates to visit each run (bounded). */
+export type DatasetCandidateSelectionMode = "sequential" | "prefer_missing_12h_label";
+
 export interface BuildShadowTrainingExamplesOptions {
   funderAddress?: string;
   limit?: number;
@@ -93,6 +96,14 @@ export interface BuildShadowTrainingExamplesOptions {
    * when 24h markout prices are missing (labelGoodDecision stays null until classification is set).
    */
   evaluatedOnly?: boolean;
+  /**
+   * sequential: legacy cursor walk by createdAt (always starts from oldest — can starve newer rows when limit is small).
+   * prefer_missing_12h_label: bounded SQL selection of candidates missing truthful 12h label (or no ML row yet), then optional fill.
+   * Primary selection does not require evaluatedAt (12h truth is snapshot-based); fill still respects evaluatedOnly when topping up.
+   */
+  datasetCandidateSelection?: DatasetCandidateSelectionMode;
+  /** Min age before a candidate is eligible for truthful 12h labeling (default 12h). */
+  minAgeMsFor12hLabel?: number;
 }
 
 export interface BuildShadowTrainingExamplesResult {

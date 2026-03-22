@@ -21,11 +21,18 @@ export async function POST(request: Request) {
     const funder = await getFunderForPaperTradingTick(funderOverride);
     const result = await runPaperTradingTick(funder ?? undefined);
     return NextResponse.json(result);
-  } catch (e) {
-    console.error("[POST /api/paper-trading/tick]", e);
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Paper trading tick failed" },
-      { status: 500 }
+  } catch (err) {
+    console.error("[paper-trading/tick] fatal error", err);
+    return new Response(
+      JSON.stringify({
+        error: "tick_failed",
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : null,
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   }
 }

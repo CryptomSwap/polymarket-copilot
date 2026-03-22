@@ -3,6 +3,24 @@ import { getPaperTradingConfig } from "./config";
 import * as fs from "fs";
 import * as path from "path";
 
+/** Global paper exploration tuning (overrides per-profile values when set). */
+const ENV_PAPER_EXPLORATION_BAND_BELOW_MIN_SCORE = "PAPER_EXPLORATION_BAND_BELOW_MIN_SCORE";
+const ENV_PAPER_EXPLORATION_MAX_PER_TICK = "PAPER_EXPLORATION_MAX_PER_TICK";
+
+function optionalPositiveFloatFromEnv(key: string): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env[key]?.trim() : "";
+  if (!raw) return undefined;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function optionalNonNegIntFromEnv(key: string): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env[key]?.trim() : "";
+  if (!raw) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 export type PriceBandLabel =
   | "0.0-0.1"
   | "0.1-0.3"
@@ -106,21 +124,23 @@ export const BOT_PROFILES: BotProfile[] = [
     botVersion: "1.0.0",
     threshold: 0.35,
     minScoreBuffer: 0.05,
-    allowReviewRequired: false,
+    /** Paper tick: allow REVIEW_REQUIRED pool (execution warn) so multi-bot is not starved; still conservative via threshold/relaxation off. */
+    allowReviewRequired: true,
     allowPaperRelaxation: false,
     allowedPolicyStates: [...CORE_ALLOWED_POLICY_STATES],
-    allowedPriceBands: ["0.3-0.7", "0.7-0.9"],
+    /** Full range so paper tick has candidates; scoring/thresholds still gate admission. */
+    allowedPriceBands: ["0.0-0.1", "0.1-0.3", "0.3-0.7", "0.7-0.9", "0.9-1.0"],
     excludedThemes: [],
     excludedCategories: [],
     cooldownHours: 24,
     cooldownMarketHours: 12,
-    maxOpenTotal: 200,
+    maxOpenTotal: 15,
     maxOpenPerMarket: 1,
     maxOpenPerTheme: 20,
     maxOpenPerCategory: 40,
-    maxDailyNewTrades: 25,
+    maxDailyNewTrades: 20,
     notes:
-      "Conservative, quality-focused bot: no review-required, no relaxation, avoids longshots and near-certains.",
+      "Conservative, quality-focused bot: paper pool includes review-warn rows; no relaxation; threshold/minScore gate quality.",
   },
   {
     botType: "relaxed_edge",
@@ -134,16 +154,16 @@ export const BOT_PROFILES: BotProfile[] = [
     allowPaperRelaxation: true,
     allowRelaxationReasons: ["edge_too_small", "liquidity_too_low", "multi_allowed", "concentration_high"],
     allowedPolicyStates: [...CORE_ALLOWED_POLICY_STATES, "REVIEW_REQUIRED"],
-    allowedPriceBands: ["0.1-0.3", "0.3-0.7", "0.7-0.9"],
+    allowedPriceBands: ["0.0-0.1", "0.1-0.3", "0.3-0.7", "0.7-0.9", "0.9-1.0"],
     excludedThemes: [],
     excludedCategories: [],
     cooldownHours: 12,
     cooldownMarketHours: 4,
-    maxOpenTotal: 500,
+    maxOpenTotal: 15,
     maxOpenPerMarket: 3,
     maxOpenPerTheme: 50,
     maxOpenPerCategory: 80,
-    maxDailyNewTrades: 95,
+    maxDailyNewTrades: 20,
     // Paper-only exploration: narrow band below threshold with conservative caps.
     explorationEnabled: true,
     explorationBandBelowMinScore: 0.02,
@@ -160,7 +180,7 @@ export const BOT_PROFILES: BotProfile[] = [
     botVersion: "1.0.0",
     threshold: 0.32,
     minScoreBuffer: 0.02,
-    allowReviewRequired: false,
+    allowReviewRequired: true,
     allowPaperRelaxation: true,
     allowRelaxationReasons: ["edge_too_small", "multi_allowed", "concentration_high"],
     allowedPolicyStates: [...CORE_ALLOWED_POLICY_STATES],
@@ -169,11 +189,11 @@ export const BOT_PROFILES: BotProfile[] = [
     excludedCategories: [],
     cooldownHours: 24,
     cooldownMarketHours: 24,
-    maxOpenTotal: 150,
+    maxOpenTotal: 15,
     maxOpenPerMarket: 2,
     maxOpenPerTheme: 25,
     maxOpenPerCategory: 40,
-    maxDailyNewTrades: 35,
+    maxDailyNewTrades: 20,
     notes:
       "Longshot and near-certain tail experiment bot; focuses on extreme prices with stricter per-market limits.",
   },
@@ -207,6 +227,8 @@ function readOptimizerBotOverrides(): Record<string, OptimizerBotOverrides> {
 export async function getEffectiveBotProfiles(): Promise<EffectiveBotProfile[]> {
   const global = getPaperTradingConfig();
   const optimizerOverrides = readOptimizerBotOverrides();
+  const envExplorationBand = optionalPositiveFloatFromEnv(ENV_PAPER_EXPLORATION_BAND_BELOW_MIN_SCORE);
+  const envExplorationMaxPerTick = optionalNonNegIntFromEnv(ENV_PAPER_EXPLORATION_MAX_PER_TICK);
 
   return BOT_PROFILES.map((p) => {
     const o = optimizerOverrides[p.botType] ?? {};
@@ -249,8 +271,9 @@ export async function getEffectiveBotProfiles(): Promise<EffectiveBotProfile[]> 
       effectiveEnabled: enabled,
       overrideSource,
       explorationEnabled: p.explorationEnabled ?? false,
-      explorationBandBelowMinScore: p.explorationBandBelowMinScore ?? 0,
-      explorationMaxPerTick: p.explorationMaxPerTick ?? 0,
+      explorationBandBelowMinScore: envExplorationBand ?? p.explorationBandBelowMinScore ?? 0,
+      explorationMaxPerTick:
+        envExplorationMaxPerTick !== undefined ? envExplorationMaxPerTick : (p.explorationMaxPerTick ?? 0),
       explorationMaxPerDay: p.explorationMaxPerDay ?? 0,
     };
     return effective;

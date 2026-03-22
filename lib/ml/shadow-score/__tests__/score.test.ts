@@ -34,6 +34,11 @@ async function run(): Promise<void> {
     if (out.success && out.result) {
       check(typeof out.result.shadowMlScore === "number", "shadowMlScore number");
       check(
+        out.result.shadowMlLogit === null || typeof out.result.shadowMlLogit === "number",
+        "shadowMlLogit number or null"
+      );
+      check(typeof out.result.shadowMlScoreCalibrated === "number", "shadowMlScoreCalibrated number");
+      check(
         ["low", "medium", "high"].includes(out.result.shadowMlScoreBand),
         "shadowMlScoreBand one of low/medium/high"
       );

@@ -9,6 +9,8 @@ import { toShadowFeatureVector } from "@/lib/ml/shadow-train/features";
 import { getActiveOrApprovedShadowModel } from "@/lib/ml/shadow-score";
 import { getPaperTradingConfig, type PaperTradingConfig } from "@/lib/paper-trading/config";
 import { BOT_PROFILES } from "@/lib/paper-trading/bot-profiles";
+import type { ShadowTargetLabel } from "@/lib/ml/shadow-train/types";
+import { scoreBandFromShadowProba } from "@/lib/paper-trading/paper-score-band";
 
 const SHADOW_MODEL_TYPE = "logistic_regression_shadow";
 const DUMP_DIR = path.join(process.cwd(), "dump");
@@ -80,6 +82,145 @@ function envBool(name: string, fallback = false): boolean {
   const raw = process.env[name]?.trim().toLowerCase();
   if (!raw) return fallback;
   return raw === "1" || raw === "true";
+}
+
+function asShadowTargetLabel(v: string | null | undefined): ShadowTargetLabel | null {
+  if (!v) return null;
+  if (
+    v === "labelGoodDecision" ||
+    v === "labelGoodDecision6h" ||
+    v === "labelGoodDecision12h" ||
+    v === "labelMissedOpportunity"
+  ) {
+    return v;
+  }
+  return null;
+}
+
+async function countRowsForTarget(targetLabel: ShadowTargetLabel): Promise<number> {
+  const rows = await prisma.mlShadowTrainingExample.findMany({
+    where: { [targetLabel]: { not: null } },
+    select: { [targetLabel]: true },
+    take: 100_000,
+  });
+  let count = 0;
+  for (const r of rows) {
+    const v = (r as Record<string, unknown>)[targetLabel];
+    if (v === true || v === false) count++;
+  }
+  return count;
+}
+
+async function chooseBootstrapTarget(minRows: number): Promise<{
+  chosenTarget: ShadowTargetLabel | null;
+  counts: {
+    labelGoodDecision12h: number;
+    labelGoodDecision6h: number;
+  };
+  rationale: string;
+}> {
+  const allow6h = envBool("SELF_IMPROVE_BOOTSTRAP_ALLOW_6H", true);
+  const preferenceOrder: Array<"labelGoodDecision12h" | "labelGoodDecision6h"> = allow6h
+    ? ["labelGoodDecision12h", "labelGoodDecision6h"]
+    : ["labelGoodDecision12h"];
+  const counts = {
+    labelGoodDecision12h: await countRowsForTarget("labelGoodDecision12h"),
+    labelGoodDecision6h: await countRowsForTarget("labelGoodDecision6h"),
+  };
+  for (const k of preferenceOrder) {
+    if (counts[k] >= minRows) {
+      return {
+        chosenTarget: k,
+        counts,
+        rationale: `selected_preferred_target_with_min_rows:${k}>=${minRows}`,
+      };
+    }
+  }
+  return {
+    chosenTarget: null,
+    counts,
+    rationale: `no_eligible_short_horizon_bootstrap_target:minRows=${minRows}:allow6h=${allow6h}`,
+  };
+}
+
+async function parseRunMetrics(runId: string): Promise<{ rocAuc: number | null; f1: number | null }> {
+  const run = await prisma.mlModelRun.findUnique({
+    where: { id: runId },
+    select: { metricsJson: true },
+  });
+  if (!run?.metricsJson) return { rocAuc: null, f1: null };
+  try {
+    const m = JSON.parse(run.metricsJson) as { rocAuc?: unknown; f1?: unknown };
+    return {
+      rocAuc: typeof m.rocAuc === "number" ? m.rocAuc : null,
+      f1: typeof m.f1 === "number" ? m.f1 : null,
+    };
+  } catch {
+    return { rocAuc: null, f1: null };
+  }
+}
+
+async function evaluateBootstrapApprovalCandidate(params: {
+  runId: string;
+  targetLabel: string;
+  trainCount: number | null;
+  validationCount: number | null;
+  coldStartAtStart: boolean;
+}): Promise<{
+  eligible: boolean;
+  reason: string;
+  guardrails: Record<string, unknown>;
+}> {
+  if (!params.coldStartAtStart) {
+    return {
+      eligible: false,
+      reason: "not_cold_start",
+      guardrails: { coldStartAtStart: false },
+    };
+  }
+  const minDataset = envInt("SELF_IMPROVE_BOOTSTRAP_MIN_DATASET", 25);
+  const minValidation = envInt("SELF_IMPROVE_BOOTSTRAP_MIN_VALIDATION", 10);
+  const minAuc = envNum("SELF_IMPROVE_BOOTSTRAP_MIN_ROC_AUC", 0.5);
+  const minF1 = envNum("SELF_IMPROVE_BOOTSTRAP_MIN_F1", 0.2);
+  const allow6h = envBool("SELF_IMPROVE_BOOTSTRAP_ALLOW_6H", true);
+  const allowedTargets = new Set<string>(allow6h ? ["labelGoodDecision12h", "labelGoodDecision6h"] : ["labelGoodDecision12h"]);
+  const { rocAuc, f1 } = await parseRunMetrics(params.runId);
+  const trainCount = params.trainCount ?? 0;
+  const validationCount = params.validationCount ?? 0;
+  const datasetSize = trainCount + validationCount;
+  const guardrails: Record<string, unknown> = {
+    coldStartAtStart: params.coldStartAtStart,
+    minDataset,
+    minValidation,
+    minAuc,
+    minF1,
+    allow6h,
+    targetLabel: params.targetLabel,
+    datasetSize,
+    validationCount,
+    rocAuc,
+    f1,
+  };
+  if (!allowedTargets.has(params.targetLabel)) {
+    return { eligible: false, reason: `target_not_bootstrap_allowed:${params.targetLabel}`, guardrails };
+  }
+  if (datasetSize < minDataset) {
+    return { eligible: false, reason: `dataset_below_min:${datasetSize}<${minDataset}`, guardrails };
+  }
+  if (validationCount < minValidation) {
+    return { eligible: false, reason: `validation_below_min:${validationCount}<${minValidation}`, guardrails };
+  }
+  if (rocAuc == null || rocAuc < minAuc) {
+    return { eligible: false, reason: `roc_auc_below_min:${rocAuc ?? "null"}<${minAuc}`, guardrails };
+  }
+  if (f1 == null || f1 < minF1) {
+    return { eligible: false, reason: `f1_below_min:${f1 ?? "null"}<${minF1}`, guardrails };
+  }
+  const existingChampion = await getActiveOrApprovedShadowModel();
+  if (existingChampion?.run.id) {
+    return { eligible: false, reason: "champion_now_exists_skip_bootstrap_auto_approve", guardrails };
+  }
+  return { eligible: true, reason: "eligible_for_bootstrap_approval", guardrails };
 }
 
 async function ensureDumpDir(): Promise<void> {
@@ -215,25 +356,101 @@ async function getMeanClosedPaperPnlPct(days: number): Promise<{ mean: number | 
   return { mean, samples: vals.length };
 }
 
+function shadowDatasetCandidateSelectionFromEnv(): "sequential" | "prefer_missing_12h_label" {
+  const v = (process.env.SHADOW_DATASET_CANDIDATE_SELECTION ?? "").toLowerCase().trim();
+  if (v === "sequential") return "sequential";
+  return "prefer_missing_12h_label";
+}
+
 export async function runShadowDatasetRefreshJob(): Promise<void> {
   const limit = envInt("SELF_IMPROVE_DATASET_BUILD_LIMIT", 1_500);
+  const coldStart = !(await getActiveOrApprovedShadowModel());
+  const allowBootstrapUnevaluated = envBool("SELF_IMPROVE_BOOTSTRAP_ALLOW_UNEVALUATED", true);
+  const evaluatedOnly = coldStart && allowBootstrapUnevaluated ? false : true;
+  const datasetCandidateSelection = shadowDatasetCandidateSelectionFromEnv();
   const res = await persistShadowTrainingExamples({
     limit,
-    evaluatedOnly: true,
+    evaluatedOnly,
+    datasetCandidateSelection,
   });
   await writeJsonReport("model-dataset-refresh-report", {
     generatedAt: new Date().toISOString(),
     limit,
+    coldStartMode: coldStart,
+    evaluatedOnly,
+    datasetCandidateSelection,
+    result: res,
+  });
+}
+
+/**
+ * Path/regime feature backfill on existing MlShadowTrainingExample rows. Runs before shadow retrain in the automated chain.
+ */
+export async function runShadowPathFeatureBackfillJob(): Promise<void> {
+  const { backfillPathRegimeFeaturesForMlExamples } = await import("@/lib/ml/shadow-dataset/backfill-path-regime-features");
+  const limit = envInt("SELF_IMPROVE_PATH_BACKFILL_LIMIT", 3_000);
+  const batchSize = envInt("SELF_IMPROVE_PATH_BACKFILL_BATCH", 50);
+  const require12h = envBool("SELF_IMPROVE_PATH_BACKFILL_REQUIRE_LABEL_12H", false);
+  const dryRun = envBool("SELF_IMPROVE_PATH_BACKFILL_DRY_RUN", false);
+  const res = await backfillPathRegimeFeaturesForMlExamples(prisma, {
+    limit,
+    batchSize,
+    dryRun,
+    requireLabelGoodDecision12h: require12h,
+  });
+  await writeJsonReport("path-feature-backfill-report", {
+    generatedAt: new Date().toISOString(),
+    limit,
+    batchSize,
+    requireLabelGoodDecision12h: require12h,
+    dryRun,
     result: res,
   });
 }
 
 export async function runShadowRetrainJob(): Promise<void> {
-  const targetLabel = (process.env.SELF_IMPROVE_TARGET_LABEL ?? "labelGoodDecision12h") as
-    | "labelGoodDecision"
-    | "labelMissedOpportunity"
-    | "labelGoodDecision6h"
-    | "labelGoodDecision12h";
+  const champion = await getActiveOrApprovedShadowModel();
+  const coldStart = !champion;
+  const envTargetLabel = asShadowTargetLabel(process.env.SELF_IMPROVE_TARGET_LABEL ?? null);
+  const bootstrapMinRows = envInt("SELF_IMPROVE_BOOTSTRAP_MIN_ROWS", 25);
+  const bootstrapChoice = coldStart ? await chooseBootstrapTarget(bootstrapMinRows) : null;
+  let targetLabel: ShadowTargetLabel;
+  let policySource: "bootstrap_policy" | "env_override" | "champion_target";
+  if (coldStart && envTargetLabel && !["labelGoodDecision12h", "labelGoodDecision6h"].includes(envTargetLabel)) {
+    await writeJsonReport("model-training-report", {
+      generatedAt: new Date().toISOString(),
+      status: "skipped",
+      reason: "cold_start_target_override_not_short_horizon",
+      envTargetLabel,
+      allowedTargets: ["labelGoodDecision12h", "labelGoodDecision6h"],
+      coldStartMode: coldStart,
+      championAtStart: null,
+    });
+    return;
+  }
+  if (envTargetLabel) {
+    targetLabel = envTargetLabel;
+    policySource = "env_override";
+  } else if (!coldStart && champion?.run.targetLabel) {
+    targetLabel = asShadowTargetLabel(champion.run.targetLabel) ?? "labelGoodDecision12h";
+    policySource = "champion_target";
+  } else {
+    if (!bootstrapChoice?.chosenTarget) {
+      await writeJsonReport("model-training-report", {
+        generatedAt: new Date().toISOString(),
+        status: "skipped",
+        reason: "no_eligible_short_horizon_bootstrap_target",
+        coldStartMode: coldStart,
+        championAtStart: champion != null ? champion.run : null,
+        bootstrapChoice,
+        minRowsRequired: bootstrapMinRows,
+        failClosed: true,
+      });
+      return;
+    }
+    targetLabel = bootstrapChoice.chosenTarget;
+    policySource = "bootstrap_policy";
+  }
   const limit = envInt("SELF_IMPROVE_TRAIN_LIMIT", 5000);
   const trainRatio = envNum("SELF_IMPROVE_TRAIN_RATIO", 0.8);
   const result = await trainShadowModel(targetLabel, { limit, trainRatio });
@@ -243,32 +460,348 @@ export async function runShadowRetrainJob(): Promise<void> {
   await writeJsonReport("model-training-report", {
     generatedAt: new Date().toISOString(),
     targetLabel,
+    policySource,
+    coldStartMode: coldStart,
+    championAtStart: champion?.run ?? null,
+    bootstrapChoice,
+    bootstrapActivationDelegated: true,
     limit,
     trainRatio,
     result,
   });
 }
 
-export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
+export async function runShadowBootstrapActivationJob(): Promise<void> {
+  const generatedAt = new Date().toISOString();
+  const champion = await getActiveOrApprovedShadowModel();
+  const coldStart = !champion;
+  if (!coldStart) {
+    await writeJsonReport("model-bootstrap-activation-report", {
+      generatedAt,
+      status: "skipped",
+      reason: "champion_exists",
+      champion: champion?.run ?? null,
+      scope: "paper_only",
+      failClosed: true,
+    });
+    return;
+  }
+  const allow6h = envBool("SELF_IMPROVE_BOOTSTRAP_ALLOW_6H", true);
+  const allowedTargets = allow6h ? ["labelGoodDecision12h", "labelGoodDecision6h"] : ["labelGoodDecision12h"];
+  const candidate = await prisma.mlModelRun.findFirst({
+    where: {
+      modelType: SHADOW_MODEL_TYPE,
+      status: "TRAINED",
+      targetLabel: { in: allowedTargets },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      targetLabel: true,
+      trainCount: true,
+      validationCount: true,
+      createdAt: true,
+    },
+  });
+  if (!candidate) {
+    await writeJsonReport("model-bootstrap-activation-report", {
+      generatedAt,
+      status: "skipped",
+      reason: "no_trained_short_horizon_candidate",
+      allowedTargets,
+      scope: "paper_only",
+      failClosed: true,
+    });
+    return;
+  }
+  const decision = await evaluateBootstrapApprovalCandidate({
+    runId: candidate.id,
+    targetLabel: candidate.targetLabel,
+    trainCount: candidate.trainCount ?? null,
+    validationCount: candidate.validationCount ?? null,
+    coldStartAtStart: coldStart,
+  });
+  if (!decision.eligible) {
+    await writeJsonReport("model-bootstrap-activation-report", {
+      generatedAt,
+      status: "skipped",
+      reason: decision.reason,
+      candidateRunId: candidate.id,
+      candidateTargetLabel: candidate.targetLabel,
+      guardrails: decision.guardrails,
+      scope: "paper_only",
+      failClosed: true,
+    });
+    return;
+  }
+  const championBeforeUpdate = await getActiveOrApprovedShadowModel();
+  if (championBeforeUpdate?.run.id) {
+    await writeJsonReport("model-bootstrap-activation-report", {
+      generatedAt,
+      status: "skipped",
+      reason: "champion_exists_before_update",
+      champion: championBeforeUpdate.run,
+      scope: "paper_only",
+      failClosed: true,
+    });
+    return;
+  }
+  const updated = await prisma.mlModelRun.updateMany({
+    where: {
+      id: candidate.id,
+      modelType: SHADOW_MODEL_TYPE,
+      status: "TRAINED",
+    },
+    data: { status: "APPROVED" },
+  });
+  if (updated.count !== 1) {
+    await writeJsonReport("model-bootstrap-activation-report", {
+      generatedAt,
+      status: "skipped",
+      reason: "candidate_not_in_expected_trained_state",
+      candidateRunId: candidate.id,
+      updatedCount: updated.count,
+      scope: "paper_only",
+      failClosed: true,
+    });
+    return;
+  }
+  await writeJsonReport("model-bootstrap-activation-report", {
+    generatedAt,
+    status: "approved",
+    activatedRunId: candidate.id,
+    statusSetTo: "APPROVED",
+    bootstrapTarget: candidate.targetLabel,
+    guardrails: decision.guardrails,
+    provenance: {
+      mode: "bootstrap_activation_job",
+      paperOnly: true,
+      noChampionRequired: true,
+    },
+    scope: "paper_only",
+  });
+}
+
+export type BootstrapActivationPreview = {
+  wouldApprove: boolean;
+  reason: string;
+  candidateRunId: string | null;
+  candidateTargetLabel: string | null;
+  guardrails?: Record<string, unknown>;
+};
+
+/** Read-only bootstrap activation outcome (same gates as runShadowBootstrapActivationJob). */
+export async function computeBootstrapActivationPreview(): Promise<BootstrapActivationPreview> {
+  const champion = await getActiveOrApprovedShadowModel();
+  const coldStart = !champion;
+  if (!coldStart) {
+    return {
+      wouldApprove: false,
+      reason: "champion_exists",
+      candidateRunId: null,
+      candidateTargetLabel: null,
+    };
+  }
+  const allow6h = envBool("SELF_IMPROVE_BOOTSTRAP_ALLOW_6H", true);
+  const allowedTargets = allow6h ? ["labelGoodDecision12h", "labelGoodDecision6h"] : ["labelGoodDecision12h"];
+  const candidate = await prisma.mlModelRun.findFirst({
+    where: {
+      modelType: SHADOW_MODEL_TYPE,
+      status: "TRAINED",
+      targetLabel: { in: allowedTargets },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      targetLabel: true,
+      trainCount: true,
+      validationCount: true,
+      createdAt: true,
+    },
+  });
+  if (!candidate) {
+    return {
+      wouldApprove: false,
+      reason: "no_trained_short_horizon_candidate",
+      candidateRunId: null,
+      candidateTargetLabel: null,
+    };
+  }
+  const decision = await evaluateBootstrapApprovalCandidate({
+    runId: candidate.id,
+    targetLabel: candidate.targetLabel,
+    trainCount: candidate.trainCount ?? null,
+    validationCount: candidate.validationCount ?? null,
+    coldStartAtStart: coldStart,
+  });
+  return {
+    wouldApprove: decision.eligible,
+    reason: decision.reason,
+    candidateRunId: candidate.id,
+    candidateTargetLabel: candidate.targetLabel,
+    guardrails: decision.guardrails,
+  };
+}
+
+function shadowEvalMinAgeMsForLoop(): number {
+  const raw = process.env.SHADOW_EVAL_MIN_AGE_MS;
+  const def = 25 * 60 * 60 * 1000;
+  if (raw == null || String(raw).trim() === "") return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return def;
+  return Math.min(Math.floor(n), 365 * 24 * 60 * 60 * 1000);
+}
+
+function shadowEvalLimitForLoop(): number {
+  const raw = process.env.SHADOW_EVAL_LIMIT;
+  const def = 100;
+  if (raw == null || String(raw).trim() === "") return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return def;
+  return Math.min(Math.floor(n), 5000);
+}
+
+/**
+ * Single orchestrated paper-only improvement pass (no live trading, no paper_config_optimize).
+ * Order: shadow truth → dataset persist → path feature backfill → retrain → bootstrap APPROVED gate → promote gate → rollback guard.
+ * Does not run paper_trading_tick (keeps on its own schedule). Writes dump/self-improving-loop-status.{json,md} at end.
+ */
+export async function runSelfImprovingPaperLoopJob(): Promise<void> {
+  const { evaluateShadowCandidates } = await import("@/lib/shadow-evaluation");
+  const generatedAt = new Date().toISOString();
+  const stages: Array<{ stage: string; ok: boolean; error?: string; at: string }> = [];
+
+  const runStage = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+      stages.push({ stage: name, ok: true, at: new Date().toISOString() });
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      stages.push({ stage: name, ok: false, error: err, at: new Date().toISOString() });
+      await writeJsonReport("self-improving-paper-loop-run", {
+        generatedAt,
+        status: "failure",
+        failedStage: name,
+        error: err,
+        stages,
+        orderingNote:
+          "truth_eval → dataset_refresh → path_backfill → retrain → bootstrap_activate → promote → rollback_guard",
+      });
+      throw e;
+    }
+  };
+
+  await runStage("shadow_evaluation", async () => {
+    await evaluateShadowCandidates({
+      minAgeMs: shadowEvalMinAgeMsForLoop(),
+      limit: shadowEvalLimitForLoop(),
+    });
+  });
+  await runStage("dataset_refresh", () => runShadowDatasetRefreshJob());
+  await runStage("path_feature_backfill", () => runShadowPathFeatureBackfillJob());
+  await runStage("shadow_retrain", () => runShadowRetrainJob());
+  await runStage("bootstrap_activate", () => runShadowBootstrapActivationJob());
+  await runStage("shadow_promote", () => runShadowEvaluateAndPromoteJob());
+  await runStage("rollback_guard", () => runSelfImprovementRollbackGuardJob());
+
+  await writeJsonReport("self-improving-paper-loop-run", {
+    generatedAt,
+    status: "success",
+    stages,
+    orderingNote:
+      "truth_eval → dataset_refresh → path_backfill → retrain → bootstrap_activate → promote → rollback_guard",
+  });
+
+  const { writeSelfImprovingLoopStatusReports } = await import("./self-improving-loop-status");
+  await writeSelfImprovingLoopStatusReports();
+}
+
+export type ShadowPromotionPreview = {
+  generatedAt: string;
+  status: "evaluated" | "skipped";
+  skipReason?: string;
+  hint?: string;
+  wouldPromote: boolean;
+  outcomeReason: string;
+  championModelRunId: string | null;
+  challengerModelRunId: string | null;
+  championTargetLabel: string | null;
+  guardrails: {
+    minSamples: number;
+    holdoutDays: number;
+    minAucDelta: number;
+    minF1Delta: number;
+    minPositiveRate: number;
+    minNegativeRate: number;
+  };
+  holdout: {
+    rows: number;
+    positiveRate: number;
+    negativeRate: number;
+    noisy: boolean;
+  };
+  metrics: {
+    champion: ReturnType<typeof computeMetrics> | null;
+    challenger: ReturnType<typeof computeMetrics> | null;
+    deltaAuc: number;
+    deltaF1: number;
+  };
+};
+
+/**
+ * Read-only shadow promotion evaluation (same gates as runShadowEvaluateAndPromoteJob). For status reports and tests.
+ */
+export async function computeShadowPromotionPreview(): Promise<ShadowPromotionPreview> {
+  const generatedAt = new Date().toISOString();
   const minSamples = envInt("SELF_IMPROVE_MIN_EVAL_SAMPLES", 250);
   const holdoutDays = envInt("SELF_IMPROVE_HOLDOUT_DAYS", 14);
   const minAucDelta = envNum("SELF_IMPROVE_MIN_AUC_DELTA", 0.01);
   const minF1Delta = envNum("SELF_IMPROVE_MIN_F1_DELTA", 0.01);
   const minPositiveRate = envNum("SELF_IMPROVE_MIN_POSITIVE_RATE", 0.05);
   const minNegativeRate = envNum("SELF_IMPROVE_MIN_NEGATIVE_RATE", 0.05);
+  const guardrails = {
+    minSamples,
+    holdoutDays,
+    minAucDelta,
+    minF1Delta,
+    minPositiveRate,
+    minNegativeRate,
+  };
 
   const active = await getActiveOrApprovedShadowModel();
   if (!active?.run.id) {
-    await writeJsonReport("model-promotion-report", {
-      generatedAt: new Date().toISOString(),
+    return {
+      generatedAt,
       status: "skipped",
-      reason: "no_active_or_approved_shadow_champion",
+      skipReason: "no_active_or_approved_shadow_champion",
       hint: "Activate or approve a shadow model first: POST /api/ml/activate-latest-shadow or POST /api/ml/approve-run with a shadow runId.",
-    });
-    return;
+      wouldPromote: false,
+      outcomeReason: "no_champion",
+      championModelRunId: null,
+      challengerModelRunId: null,
+      championTargetLabel: null,
+      guardrails,
+      holdout: { rows: 0, positiveRate: 0, negativeRate: 0, noisy: true },
+      metrics: { champion: null, challenger: null, deltaAuc: 0, deltaF1: 0 },
+    };
   }
+
   const champion = await prisma.mlModelRun.findUnique({ where: { id: active.run.id } });
-  if (!champion?.metricsJson) throw new Error("self_improve_champion_not_found");
+  if (!champion?.metricsJson) {
+    return {
+      generatedAt,
+      status: "skipped",
+      skipReason: "champion_row_or_metrics_missing",
+      wouldPromote: false,
+      outcomeReason: "champion_not_found",
+      championModelRunId: active.run.id,
+      challengerModelRunId: null,
+      championTargetLabel: champion?.targetLabel ?? null,
+      guardrails,
+      holdout: { rows: 0, positiveRate: 0, negativeRate: 0, noisy: true },
+      metrics: { champion: null, challenger: null, deltaAuc: 0, deltaF1: 0 },
+    };
+  }
 
   const challenger = await prisma.mlModelRun.findFirst({
     where: {
@@ -279,20 +812,39 @@ export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
     },
     orderBy: { createdAt: "desc" },
   });
+
   if (!challenger?.metricsJson) {
-    await writeJsonReport("model-promotion-report", {
-      generatedAt: new Date().toISOString(),
+    return {
+      generatedAt,
       status: "skipped",
-      reason: "no_trained_challenger",
+      skipReason: "no_trained_challenger",
+      wouldPromote: false,
+      outcomeReason: "no_challenger",
       championModelRunId: champion.id,
-    });
-    return;
+      challengerModelRunId: null,
+      championTargetLabel: champion.targetLabel,
+      guardrails,
+      holdout: { rows: 0, positiveRate: 0, negativeRate: 0, noisy: true },
+      metrics: { champion: null, challenger: null, deltaAuc: 0, deltaF1: 0 },
+    };
   }
 
   const championModel = modelFromMetricsJson(champion.metricsJson);
   const challengerModel = modelFromMetricsJson(challenger.metricsJson);
   if (!championModel || !challengerModel) {
-    throw new Error("self_improve_unusable_model_artifact");
+    return {
+      generatedAt,
+      status: "skipped",
+      skipReason: "unusable_model_artifact",
+      wouldPromote: false,
+      outcomeReason: "metrics_parse_failed",
+      championModelRunId: champion.id,
+      challengerModelRunId: challenger.id,
+      championTargetLabel: champion.targetLabel,
+      guardrails,
+      holdout: { rows: 0, positiveRate: 0, negativeRate: 0, noisy: true },
+      metrics: { champion: null, challenger: null, deltaAuc: 0, deltaF1: 0 },
+    };
   }
 
   const since = new Date(Date.now() - holdoutDays * 24 * 60 * 60 * 1000);
@@ -326,49 +878,20 @@ export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
     deltaAuc = challengerMetrics.rocAuc - championMetrics.rocAuc;
     deltaF1 = challengerMetrics.f1 - championMetrics.f1;
     promoted = deltaAuc >= minAucDelta && deltaF1 >= minF1Delta;
-    promoteReason = promoted ? "promoted" : "metric_delta_below_threshold";
+    promoteReason = promoted ? "would_promote" : "metric_delta_below_threshold";
   } else {
     promoteReason = "noisy_or_insufficient_data";
   }
 
-  if (promoted) {
-    await prisma.$transaction(async (tx) => {
-      await tx.mlModelRun.updateMany({
-        where: { modelType: SHADOW_MODEL_TYPE, status: "ACTIVE", id: { not: challenger.id } },
-        data: { status: "VALIDATED" },
-      });
-      await tx.mlModelRun.update({
-        where: { id: challenger.id },
-        data: { status: "ACTIVE" },
-      });
-    });
-
-    const baseline = await getMeanClosedPaperPnlPct(envInt("SELF_IMPROVE_BASELINE_LOOKBACK_DAYS", 7));
-    const state = await loadState();
-    state.lastModelPromotion = {
-      at: new Date().toISOString(),
-      previousModelRunId: champion.id,
-      promotedModelRunId: challenger.id,
-      baselineMeanPnlPct: baseline.mean,
-      baselineSamples: baseline.samples,
-    };
-    await saveState(state);
-  }
-
-  await writeJsonReport("model-promotion-report", {
-    generatedAt: new Date().toISOString(),
+  return {
+    generatedAt,
+    status: "evaluated",
+    wouldPromote: promoted,
+    outcomeReason: promoteReason,
     championModelRunId: champion.id,
     challengerModelRunId: challenger.id,
-    promoted,
-    reason: promoteReason,
-    guardrails: {
-      minSamples,
-      holdoutDays,
-      minAucDelta,
-      minF1Delta,
-      minPositiveRate,
-      minNegativeRate,
-    },
+    championTargetLabel: champion.targetLabel,
+    guardrails,
     holdout: {
       rows: y.length,
       positiveRate: posRate,
@@ -381,6 +904,56 @@ export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
       deltaAuc,
       deltaF1,
     },
+  };
+}
+
+export async function runShadowEvaluateAndPromoteJob(): Promise<void> {
+  const preview = await computeShadowPromotionPreview();
+  if (preview.status === "skipped") {
+    await writeJsonReport("model-promotion-report", {
+      ...preview,
+      promoted: false,
+      reason: preview.skipReason ?? preview.outcomeReason,
+    });
+    return;
+  }
+
+  const championId = preview.championModelRunId!;
+  const challengerId = preview.challengerModelRunId!;
+
+  if (preview.wouldPromote) {
+    await prisma.$transaction(async (tx) => {
+      await tx.mlModelRun.updateMany({
+        where: { modelType: SHADOW_MODEL_TYPE, status: "ACTIVE", id: { not: challengerId } },
+        data: { status: "VALIDATED" },
+      });
+      await tx.mlModelRun.update({
+        where: { id: challengerId },
+        data: { status: "ACTIVE" },
+      });
+    });
+
+    const baseline = await getMeanClosedPaperPnlPct(envInt("SELF_IMPROVE_BASELINE_LOOKBACK_DAYS", 7));
+    const state = await loadState();
+    state.lastModelPromotion = {
+      at: new Date().toISOString(),
+      previousModelRunId: championId,
+      promotedModelRunId: challengerId,
+      baselineMeanPnlPct: baseline.mean,
+      baselineSamples: baseline.samples,
+    };
+    await saveState(state);
+  }
+
+  await writeJsonReport("model-promotion-report", {
+    generatedAt: preview.generatedAt,
+    championModelRunId: championId,
+    challengerModelRunId: challengerId,
+    promoted: preview.wouldPromote,
+    reason: preview.wouldPromote ? "promoted" : preview.outcomeReason,
+    guardrails: preview.guardrails,
+    holdout: preview.holdout,
+    metrics: preview.metrics,
   });
 }
 
@@ -496,6 +1069,10 @@ export async function runPaperConfigOptimizerJob(): Promise<void> {
   });
 }
 
+function scoreBandForPaperTrade(score: number): "low" | "medium" | "high" {
+  return scoreBandFromShadowProba(score);
+}
+
 export async function runSelfImprovementRollbackGuardJob(): Promise<void> {
   const state = await loadState();
   const minSamples = envInt("SELF_IMPROVE_ROLLBACK_MIN_SAMPLES", 30);
@@ -504,13 +1081,50 @@ export async function runSelfImprovementRollbackGuardJob(): Promise<void> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
   const events: Array<Record<string, unknown>> = [];
 
+  const closedRecent = await prisma.paperTrade.findMany({
+    where: { status: "closed", exitTime: { gte: since } },
+    select: { score: true, pnlPct: true, modelRunId: true },
+  });
+  const bandStats: Record<
+    string,
+    { samples: number; meanPnlPct: number | null; winRate: number | null }
+  > = { low: { samples: 0, meanPnlPct: null, winRate: null }, medium: { samples: 0, meanPnlPct: null, winRate: null }, high: { samples: 0, meanPnlPct: null, winRate: null } };
+  for (const b of ["low", "medium", "high"] as const) {
+    const rows = closedRecent.filter((r) => scoreBandForPaperTrade(r.score) === b);
+    const pnls = rows.map((r) => asNum(r.pnlPct)).filter((v): v is number => v != null);
+    bandStats[b] = {
+      samples: pnls.length,
+      meanPnlPct: pnls.length ? pnls.reduce((a, x) => a + x, 0) / pnls.length : null,
+      winRate: pnls.length ? pnls.filter((x) => x > 0).length / pnls.length : null,
+    };
+  }
+
+  let rollbackRecommendation: "hold" | "investigate" | "rollback_last_promotion_if_configured" = "hold";
+  if (state.lastModelPromotion?.promotedModelRunId) {
+    const promotedId = state.lastModelPromotion.promotedModelRunId;
+    const promoPnls = closedRecent
+      .filter((r) => r.modelRunId === promotedId)
+      .map((r) => asNum(r.pnlPct))
+      .filter((v): v is number => v != null);
+    const mean = promoPnls.length ? promoPnls.reduce((a, x) => a + x, 0) / promoPnls.length : null;
+    const baseline = state.lastModelPromotion.baselineMeanPnlPct;
+    const delta = mean != null && baseline != null ? mean - baseline : null;
+    if (
+      state.lastModelPromotion.previousModelRunId &&
+      promoPnls.length >= minSamples &&
+      delta != null &&
+      delta <= maxDrawdownDelta
+    ) {
+      rollbackRecommendation = "rollback_last_promotion_if_configured";
+    } else if (promoPnls.length >= minSamples && mean != null && mean < -0.02) {
+      rollbackRecommendation = "investigate";
+    }
+  }
+
   if (state.lastModelPromotion) {
     const promoted = state.lastModelPromotion.promotedModelRunId;
-    const rows = await prisma.paperTrade.findMany({
-      where: { modelRunId: promoted, status: "closed", exitTime: { gte: since } },
-      select: { pnlPct: true },
-    });
-    const pnl = rows.map((r) => asNum(r.pnlPct)).filter((v): v is number => v != null);
+    const promoRows = closedRecent.filter((r) => r.modelRunId === promoted);
+    const pnl = promoRows.map((r) => asNum(r.pnlPct)).filter((v): v is number => v != null);
     const mean = pnl.length ? pnl.reduce((a, b) => a + b, 0) / pnl.length : null;
     const baseline = state.lastModelPromotion.baselineMeanPnlPct;
     const delta = mean != null && baseline != null ? mean - baseline : null;
@@ -572,6 +1186,9 @@ export async function runSelfImprovementRollbackGuardJob(): Promise<void> {
     minSamples,
     maxDrawdownDelta,
     events,
+    paperTradeOutcomesByScoreBand: bandStats,
+    rollbackRecommendation,
+    note: "rollbackRecommendation is advisory; automatic rollback only runs when lastModelPromotion exists and drawdown gate fires (existing behavior).",
   });
 }
 
@@ -599,5 +1216,7 @@ export async function runSelfImprovementStatusReportJob(): Promise<void> {
     },
     optimizerOverrides: overrides,
   });
+  const { writeSelfImprovingLoopStatusReports } = await import("./self-improving-loop-status");
+  await writeSelfImprovingLoopStatusReports();
 }
 
