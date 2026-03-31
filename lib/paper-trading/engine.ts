@@ -15,6 +15,7 @@ import {
   mergeShadowDiagnosticsIntoLoadDiagnostics,
   normalizePreferredFunderForShadowLoad,
   paperLoadDiagnosticsFromShadowOnly,
+  recoThesisMetadataForPaperTrade,
   type PaperTradingCandidate,
   type ShadowTickLoadDiagnostics,
 } from "./candidates";
@@ -63,6 +64,18 @@ import { resolvePaperTradeCloseExitPrice } from "@/lib/polymarket/market-price-s
 const FUNDER_PAPER = "paper";
 const STATE_ID = "default";
 
+/** TEMP eval gate: reco_thesis + directional only. Remove block sites + this constant to revert. */
+const REJECT_RECO_THESIS_DIRECTIONAL_EVAL: PaperDecisionRejectReasonCode =
+  "directional_temporarily_disabled_for_eval";
+
+function isRecoThesisDirectionalForPaperEval(
+  c: Pick<PaperTradingCandidate, "strategyFamily" | "hypothesisType">
+): boolean {
+  return (
+    c.strategyFamily?.trim() === "reco_thesis" && c.hypothesisType?.trim() === "directional"
+  );
+}
+
 function paperShadowAdmissionScore(sr: ShadowScoreResult, cfg: ReturnType<typeof getPaperTradingConfig>): number {
   return cfg.paperShadowUseCalibratedScoreForPaper ? sr.shadowMlScoreCalibrated : sr.shadowMlScore;
 }
@@ -99,6 +112,14 @@ function parseNum(s: string | null | undefined): number | null {
   if (s == null || s === "") return null;
   const n = parseFloat(String(s).trim());
   return Number.isFinite(n) ? n : null;
+}
+
+function resolvePaperCloseMaxHoldHours(): number {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_TRADING_MAX_HOLD_HOURS?.trim() : "";
+  if (!raw) return PAPER_CLOSE_HORIZON_MS / (60 * 60 * 1000);
+  const parsed = parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return PAPER_CLOSE_HORIZON_MS / (60 * 60 * 1000);
+  return parsed;
 }
 
 /**
@@ -349,6 +370,11 @@ export interface PaperTradingTickResult {
   rejectedBySpreadGuardCount?: number;
   /** Paper-only: slippage guard rejections this tick (sum across bots). */
   rejectedBySlippageGuardCount?: number;
+  /**
+   * TEMP: candidates rejected as reco_thesis + hypothesisType directional (controlled eval).
+   * Revert by removing the admission gate in `runPaperTradingTick`.
+   */
+  rejectedRecoThesisDirectionalEvalCount?: number;
   topCandidateScores: { assetId: string; side: string; score: number }[];
   /** Count of candidates scored that came from paper relaxation (relaxed_block_candidate). */
   scoredAfterRelaxation?: number;
@@ -472,6 +498,20 @@ export interface PaperTradingTickResult {
     extendedLookbackTriedMinutes: number | null;
     shadowRowsQueried: number;
   };
+  /** Compact per-candidate risk cap debug sample for latest tick (read-only diagnostics). */
+  riskLimitDebugSample?: Array<{
+    candidateId: string | null;
+    assetId: string;
+    botType: string;
+    rejectReasonCode: string;
+    strategyFamily: string | null;
+    hypothesisType: string | null;
+    maxOpenTotalUsed: number | null;
+    openCountUsed: number | null;
+    sourcePath: string;
+    capSource: string;
+    meta?: Record<string, unknown>;
+  }>;
 }
 
 /**
@@ -483,6 +523,11 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
   const errors: string[] = [];
   let totalOpened = 0;
   let totalSkipped = 0;
+  const riskLimitDebugSample: NonNullable<PaperTradingTickResult["riskLimitDebugSample"]> = [];
+  const pushRiskLimitDebug = (entry: NonNullable<PaperTradingTickResult["riskLimitDebugSample"]>[number]) => {
+    if (riskLimitDebugSample.length >= 50) return;
+    riskLimitDebugSample.push(entry);
+  };
 
   const emptyResult = (overrides: Partial<PaperTradingTickResult> = {}): PaperTradingTickResult => ({
     opened: 0,
@@ -620,6 +665,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
     let relaxedDueToConcentrationScoredCount = 0;
     let relaxedDueToConcentrationOpenedCount = 0;
     let relaxedConcentrationRejectedByCap = 0;
+    let rejectedRecoThesisDirectionalEvalCount = 0;
 
     const legacyTraces: PaperDecisionTraceEntry[] = [];
     const legacyAgg = initPerBotAggregate("default");
@@ -744,6 +790,23 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
         continue;
       }
       if (config.maxOpenTotal > 0 && openCountTotal + totalOpened >= config.maxOpenTotal) {
+        pushRiskLimitDebug({
+          candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+          assetId: c.assetId,
+          botType: "default",
+          rejectReasonCode: "max_open_total",
+          strategyFamily: c.strategyFamily ?? null,
+          hypothesisType: c.hypothesisType ?? null,
+          maxOpenTotalUsed: config.maxOpenTotal,
+          openCountUsed: openCountTotal + totalOpened,
+          sourcePath: "runPaperTradingTick.legacy.global_cap",
+          capSource: "global_max_open_total",
+          meta: {
+            openCountTotal,
+            openedThisTickGlobal: totalOpened,
+            funderUsedForCandidateLoad: tickFunder,
+          },
+        });
         legacyTraces.push(buildTraceEntry({
           botType: "default",
           c,
@@ -1035,6 +1098,31 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
           exceedsTheme = openConcentrationInTheme >= perThemeCap;
         }
         if (exceedsTick || exceedsDay || exceedsMarket || exceedsTheme) {
+          pushRiskLimitDebug({
+            candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+            assetId: c.assetId,
+            botType: "default",
+            rejectReasonCode: "max_open_total",
+            strategyFamily: c.strategyFamily ?? null,
+            hypothesisType: c.hypothesisType ?? null,
+            maxOpenTotalUsed: null,
+            openCountUsed: null,
+            sourcePath: "runPaperTradingTick.legacy.relaxed_concentration_cap",
+            capSource: "relaxed_concentration_cap_mapped_to_max_open_total",
+            meta: {
+              exceedsTick,
+              exceedsDay,
+              exceedsMarket,
+              exceedsTheme,
+              perTickCap,
+              perDayCap,
+              perMarketCap,
+              perThemeCap,
+              relaxedDueToConcentrationOpenedCount,
+              createdTodayRelaxedConcentration,
+              funderUsedForCandidateLoad: tickFunder,
+            },
+          });
           relaxedConcentrationRejectedByCap++;
           legacyTraces.push(buildTraceEntry({
             botType: "default",
@@ -1067,6 +1155,35 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
 
       // Provenance: actual admission path. Legacy path only admits via threshold (score >= minScore).
       const explorationAdmissionMode: "threshold" | "exploration" = "threshold";
+
+      if (isRecoThesisDirectionalForPaperEval(c)) {
+        legacyTraces.push(
+          buildTraceEntry({
+            botType: "default",
+            c,
+            championModelRunId,
+            challengerModelRunId: championChallenger.challengerModelRunId,
+            championScore: championChallenger.championScore,
+            challengerScore: championChallenger.challengerScore,
+            scoreDelta: championChallenger.scoreDelta,
+            ...legacyTraceAdmissionFields,
+            minScore: effectiveMinScore,
+            thresholdEligible: paperTraceThresholdEligible(admissionScore, effectiveMinScore),
+            explorationEligible: false,
+            explorationUsed: false,
+            budgetLimited: false,
+            cooldownLimited: false,
+            dedupeLimited: false,
+            capsLimited: false,
+            finalDisposition: "rejected",
+            rejectReasonCode: REJECT_RECO_THESIS_DIRECTIONAL_EVAL,
+          })
+        );
+        incReject(legacyAgg, REJECT_RECO_THESIS_DIRECTIONAL_EVAL);
+        rejectedRecoThesisDirectionalEvalCount++;
+        totalSkipped++;
+        continue;
+      }
 
       try {
         const profileSnapshot = JSON.stringify({
@@ -1103,6 +1220,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
           recommendationId: c.recommendationId,
           targetLabel: active.run.targetLabel,
           ...(c.shadowCandidateId && { shadowCandidateId: c.shadowCandidateId }),
+          ...recoThesisMetadataForPaperTrade(c),
           ...(c.passedViaRelaxation &&
             c.relaxedBlockReason && {
               paperOnlyRelaxation: true,
@@ -1298,6 +1416,8 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
         extendedLookbackTriedMinutes: globalShadowDiagnostics.extendedLookbackTriedMinutes ?? null,
         shadowRowsQueried: globalShadowDiagnostics.shadowRowsQueried,
       },
+      rejectedRecoThesisDirectionalEvalCount,
+      riskLimitDebugSample,
       loadDiagnostics: {
         ...loadDiagnostics,
         relaxedConcentrationRejectedByCap,
@@ -1311,6 +1431,11 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
         traces: legacyTraces.slice(-MAX_DECISION_TRACES_STORED),
       },
     };
+    if (rejectedRecoThesisDirectionalEvalCount > 0) {
+      console.info("[paper-trading] reco_thesis directional disabled for eval", {
+        rejectedRecoThesisDirectionalEvalCount,
+      });
+    }
     console.info("[paper-trading] tick shadow bridge proof", tickResult.tickProof);
     await persistOpenTickState(
       now,
@@ -1352,6 +1477,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
 
   let totalRejectedBySpreadGuard = 0;
   let totalRejectedBySlippageGuard = 0;
+  let totalRejectedRecoThesisDirectionalEval = 0;
 
   const paperInTickOpensByBot: Record<string, number> = {};
   const paperExplorationOpensByBot: Record<string, number> = {};
@@ -1627,6 +1753,25 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
 
       const maxOpenTotal = profile.maxOpenTotal ?? config.maxOpenTotal;
       if (maxOpenTotal > 0 && openCountTotal + openedForBot >= maxOpenTotal) {
+        pushRiskLimitDebug({
+          candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+          assetId: c.assetId,
+          botType: profile.botType,
+          rejectReasonCode: "max_open_total",
+          strategyFamily: c.strategyFamily ?? null,
+          hypothesisType: c.hypothesisType ?? null,
+          maxOpenTotalUsed: maxOpenTotal,
+          openCountUsed: openCountTotal + openedForBot,
+          sourcePath: "runPaperTradingTick.multibot.global_cap",
+          capSource: "global_max_open_total",
+          meta: {
+            openCountTotal,
+            openedForBot,
+            profileMaxOpenTotal: profile.maxOpenTotal ?? null,
+            configMaxOpenTotal: config.maxOpenTotal,
+            funderUsedForCandidateLoad: tickFunder,
+          },
+        });
         allTraces.push(buildTraceEntry({
           botType: profile.botType,
           c,
@@ -1768,6 +1913,25 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
           const altOpenedThisTick = paperInTickOpensByBot[altProfile.botType] ?? 0;
           const altMaxOpenTotal = altProfile.maxOpenTotal ?? config.maxOpenTotal;
           if (altMaxOpenTotal > 0 && altOpenCountTotal + altOpenedThisTick >= altMaxOpenTotal) {
+            pushRiskLimitDebug({
+              candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+              assetId: c.assetId,
+              botType: altProfile.botType,
+              rejectReasonCode: "max_open_total",
+              strategyFamily: c.strategyFamily ?? null,
+              hypothesisType: c.hypothesisType ?? null,
+              maxOpenTotalUsed: altMaxOpenTotal,
+              openCountUsed: altOpenCountTotal + altOpenedThisTick,
+              sourcePath: "runPaperTradingTick.multibot.overflow_alt_global_cap",
+              capSource: "global_max_open_total",
+              meta: {
+                altOpenCountTotal,
+                altOpenedThisTick,
+                altProfileMaxOpenTotal: altProfile.maxOpenTotal ?? null,
+                configMaxOpenTotal: config.maxOpenTotal,
+                funderUsedForCandidateLoad: tickFunder,
+              },
+            });
             lastOverflowTerminal = "max_open_total";
             continue;
           }
@@ -1920,6 +2084,31 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
               exceedsTheme = openConcentrationInTheme >= perThemeCap;
             }
             if (exceedsTick || exceedsDay || exceedsMarket || exceedsTheme) {
+              pushRiskLimitDebug({
+                candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+                assetId: c.assetId,
+                botType: altProfile.botType,
+                rejectReasonCode: "max_open_total",
+                strategyFamily: c.strategyFamily ?? null,
+                hypothesisType: c.hypothesisType ?? null,
+                maxOpenTotalUsed: null,
+                openCountUsed: null,
+                sourcePath: "runPaperTradingTick.multibot.overflow_alt_relaxed_concentration_cap",
+                capSource: "relaxed_concentration_cap_mapped_to_max_open_total",
+                meta: {
+                  exceedsTick,
+                  exceedsDay,
+                  exceedsMarket,
+                  exceedsTheme,
+                  perTickCap,
+                  perDayCap,
+                  perMarketCap,
+                  perThemeCap,
+                  altRelaxedOpenedThisTick,
+                  altCreatedTodayRelaxedConcentration,
+                  funderUsedForCandidateLoad: tickFunder,
+                },
+              });
               lastOverflowTerminal = "max_open_total";
               continue;
             }
@@ -1927,6 +2116,37 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
 
           const finalExplorationAdmissionModeAlt: "threshold" | "exploration" =
             altExplorationAdmissionMode ?? "threshold";
+
+          if (isRecoThesisDirectionalForPaperEval(c)) {
+            allTraces.push(
+              buildTraceEntry({
+                botType: altProfile.botType,
+                c,
+                championModelRunId,
+                challengerModelRunId: championChallenger.challengerModelRunId,
+                championScore: championChallenger.championScore,
+                challengerScore: championChallenger.challengerScore,
+                scoreDelta: championChallenger.scoreDelta,
+                ...traceAdmissionFields,
+                minScore: altEffectiveMinScore,
+                explorationMinScore: altExplorationEnabledForBot ? altExplorationMinScore : null,
+                thresholdEligible: paperTraceThresholdEligible(admissionScore, altEffectiveMinScore),
+                explorationEligible:
+                  altExplorationEnabledForBot && altExplorationBandBelowMinScore > 0,
+                explorationUsed: altExplorationAdmissionMode === "exploration",
+                budgetLimited: false,
+                cooldownLimited: false,
+                dedupeLimited: false,
+                capsLimited: false,
+                finalDisposition: "rejected",
+                rejectReasonCode: REJECT_RECO_THESIS_DIRECTIONAL_EVAL,
+              })
+            );
+            incReject(targetAggAlt, REJECT_RECO_THESIS_DIRECTIONAL_EVAL);
+            totalRejectedRecoThesisDirectionalEval++;
+            lastOverflowTerminal = REJECT_RECO_THESIS_DIRECTIONAL_EVAL;
+            continue;
+          }
 
           if (altExplorationAdmissionMode === "exploration") {
             targetAggAlt.explorationEligible++;
@@ -2007,6 +2227,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
               botDisplayName: altProfile.displayName,
               botVersion: altProfile.botVersion ?? null,
               ...(c.shadowCandidateId && { shadowCandidateId: c.shadowCandidateId }),
+              ...recoThesisMetadataForPaperTrade(c),
               exploration:
                 finalExplorationAdmissionModeAlt === "exploration"
                   ? {
@@ -2458,6 +2679,31 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
           exceedsTheme = openConcentrationInTheme >= perThemeCap;
         }
         if (exceedsTick || exceedsDay || exceedsMarket || exceedsTheme) {
+          pushRiskLimitDebug({
+            candidateId: c.shadowCandidateId ?? c.recommendationId ?? null,
+            assetId: c.assetId,
+            botType: profile.botType,
+            rejectReasonCode: "max_open_total",
+            strategyFamily: c.strategyFamily ?? null,
+            hypothesisType: c.hypothesisType ?? null,
+            maxOpenTotalUsed: null,
+            openCountUsed: null,
+            sourcePath: "runPaperTradingTick.multibot.relaxed_concentration_cap",
+            capSource: "relaxed_concentration_cap_mapped_to_max_open_total",
+            meta: {
+              exceedsTick,
+              exceedsDay,
+              exceedsMarket,
+              exceedsTheme,
+              perTickCap,
+              perDayCap,
+              perMarketCap,
+              perThemeCap,
+              relaxedDueToConcentrationOpenedCount,
+              createdTodayRelaxedConcentration,
+              funderUsedForCandidateLoad: tickFunder,
+            },
+          });
           relaxedConcentrationRejectedByCap++;
           allTraces.push(buildTraceEntry({
             botType: profile.botType,
@@ -2492,6 +2738,36 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
       // Provenance: actual admission path. Multi-bot path can admit via threshold or exploration (paper-only).
       const finalExplorationAdmissionMode: "threshold" | "exploration" =
         explorationAdmissionMode ?? "threshold";
+
+      if (isRecoThesisDirectionalForPaperEval(c)) {
+        allTraces.push(
+          buildTraceEntry({
+            botType: profile.botType,
+            c,
+            championModelRunId,
+            challengerModelRunId: championChallenger.challengerModelRunId,
+            championScore: championChallenger.championScore,
+            challengerScore: championChallenger.challengerScore,
+            scoreDelta: championChallenger.scoreDelta,
+            ...traceAdmissionFields,
+            minScore: effectiveMinScore,
+            explorationMinScore: explorationEnabledForBot ? explorationMinScore : null,
+            thresholdEligible: paperTraceThresholdEligible(admissionScore, effectiveMinScore),
+            explorationEligible: explorationEnabledForBot && explorationBandBelowMinScore > 0,
+            explorationUsed: explorationAdmissionMode === "exploration",
+            budgetLimited: false,
+            cooldownLimited: false,
+            dedupeLimited: false,
+            capsLimited: false,
+            finalDisposition: "rejected",
+            rejectReasonCode: REJECT_RECO_THESIS_DIRECTIONAL_EVAL,
+          })
+        );
+        incReject(agg, REJECT_RECO_THESIS_DIRECTIONAL_EVAL);
+        totalRejectedRecoThesisDirectionalEval++;
+        skippedForBot++;
+        continue;
+      }
 
       try {
         const profileSnapshot = JSON.stringify({
@@ -2563,6 +2839,7 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
           botDisplayName: profile.displayName,
           botVersion: profile.botVersion ?? null,
           ...(c.shadowCandidateId && { shadowCandidateId: c.shadowCandidateId }),
+          ...recoThesisMetadataForPaperTrade(c),
           exploration:
             finalExplorationAdmissionMode === "exploration"
               ? {
@@ -2831,6 +3108,8 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
       extendedLookbackTriedMinutes: globalShadowDiagnostics.extendedLookbackTriedMinutes ?? null,
       shadowRowsQueried: globalShadowDiagnostics.shadowRowsQueried,
     },
+    rejectedRecoThesisDirectionalEvalCount: totalRejectedRecoThesisDirectionalEval,
+    riskLimitDebugSample,
     perBotResults,
     botBudgets: budgetAllocatorEnabled ? botBudgetsApplied : undefined,
     decisionTraceBundle: {
@@ -2841,9 +3120,302 @@ export async function runPaperTradingTick(funderAddress?: string): Promise<Paper
       traces: allTraces.slice(-MAX_DECISION_TRACES_STORED),
     },
   };
+  if (totalRejectedRecoThesisDirectionalEval > 0) {
+    console.info("[paper-trading] reco_thesis directional disabled for eval", {
+      rejectedRecoThesisDirectionalEvalCount: totalRejectedRecoThesisDirectionalEval,
+    });
+  }
   console.info("[paper-trading] tick shadow bridge proof", tickResult.tickProof);
   await persistOpenTickState(now, tickResult, errors.length > 0 ? errors[errors.length - 1] : null);
   return tickResult;
+}
+
+export type PaperTickV1ComparableRejectReason =
+  | "score_failed"
+  | "profile_filter"
+  | "below_threshold"
+  | "liquidity_spread"
+  | "liquidity_slippage"
+  | "global_max_open_total"
+  | "bot_max_open";
+
+export interface PaperTickV1ComparableTraceEntry {
+  botType: string;
+  candidateId: string | null;
+  recommendationId: string;
+  assetId: string;
+  marketId: string;
+  side: string;
+  score: number | null;
+  admitted: boolean;
+  rejectReason: PaperTickV1ComparableRejectReason | null;
+}
+
+export interface PaperTickV1ComparableResult {
+  enabled: boolean;
+  modelRunId: string | null;
+  funderUsedForCandidateLoad: string | null;
+  candidatesLoaded: number;
+  candidatesConsidered: number;
+  opened: number;
+  errors: string[];
+  rejectReasonDistribution: Record<PaperTickV1ComparableRejectReason, number>;
+  trace: PaperTickV1ComparableTraceEntry[];
+}
+
+export interface RunPaperTradingTickV1ComparableOptions {
+  funderAddress?: string;
+  preloadedCandidates?: PaperTradingCandidate[];
+  preloadedProfiles?: EffectiveBotProfile[];
+  initialOpenTotal?: number;
+  initialOpenByBot?: Record<string, number>;
+}
+
+function emptyV1ComparableRejectCounts(): Record<PaperTickV1ComparableRejectReason, number> {
+  return {
+    score_failed: 0,
+    profile_filter: 0,
+    below_threshold: 0,
+    liquidity_spread: 0,
+    liquidity_slippage: 0,
+    global_max_open_total: 0,
+    bot_max_open: 0,
+  };
+}
+
+/**
+ * Read-only comparable path for v1 admission behavior.
+ * No writes, no scheduler wiring changes.
+ */
+export async function runPaperTradingTickV1Comparable(
+  opts?: RunPaperTradingTickV1ComparableOptions
+): Promise<PaperTickV1ComparableResult> {
+  const options = opts ?? {};
+  const config = getPaperTradingConfig();
+  const errors: string[] = [];
+  const rejectReasonDistribution = emptyV1ComparableRejectCounts();
+  const trace: PaperTickV1ComparableTraceEntry[] = [];
+  const result: PaperTickV1ComparableResult = {
+    enabled: config.enabled,
+    modelRunId: null,
+    funderUsedForCandidateLoad: null,
+    candidatesLoaded: 0,
+    candidatesConsidered: 0,
+    opened: 0,
+    errors,
+    rejectReasonDistribution,
+    trace,
+  };
+  if (!config.enabled) return result;
+
+  const active = await getActiveOrApprovedShadowModel();
+  if (!active) {
+    errors.push("No ACTIVE or APPROVED shadow model.");
+    return result;
+  }
+  result.modelRunId = active.run.id;
+
+  const explicitHint =
+    options.funderAddress != null && String(options.funderAddress).trim() !== ""
+      ? String(options.funderAddress).trim()
+      : null;
+  const preferredFunder = normalizePreferredFunderForShadowLoad(
+    explicitHint ?? (await getFunderForPaperTradingTick())
+  );
+
+  const loaded = options.preloadedCandidates
+    ? { candidates: options.preloadedCandidates, shadowDiagnostics: null }
+    : await loadShadowCandidatesForPaperTick({ preferredFunder });
+  const candidates = loaded.candidates;
+  result.candidatesLoaded = candidates.length;
+  result.funderUsedForCandidateLoad =
+    loaded.shadowDiagnostics?.funderUsedForLoad ?? preferredFunder ?? null;
+
+  const profiles = options.preloadedProfiles ?? (await getActiveBotProfiles());
+  const effectiveProfiles: EffectiveBotProfile[] =
+    profiles.length > 0
+      ? profiles
+      : [
+          {
+            botType: "default",
+            displayName: "Default",
+            enabled: true,
+            targetLabel: null,
+            botVersion: null,
+            threshold: config.threshold,
+            minScoreBuffer: config.minScoreBuffer,
+            allowReviewRequired: config.allowReviewRequired,
+            allowPaperRelaxation: false,
+            allowRelaxationReasons: null,
+            allowedPolicyStates: null,
+            allowedPriceBands: null,
+            excludedThemes: [],
+            excludedCategories: [],
+            cooldownHours: config.cooldownHours,
+            cooldownMarketHours: config.cooldownMarketHours,
+            maxOpenTotal: config.maxOpenTotal,
+            maxOpenPerMarket: config.maxOpenPerMarket,
+            maxOpenPerTheme: config.maxOpenPerTheme,
+            maxOpenPerCategory: config.maxOpenPerCategory,
+            maxDailyNewTrades: config.maxDailyNewTrades,
+            notes: "v1_comparable_fallback_profile",
+            effectiveEnabled: true,
+            overrideSource: null,
+            explorationEnabled: false,
+            explorationBandBelowMinScore: 0,
+            explorationMaxPerTick: 0,
+            explorationMaxPerDay: 0,
+          },
+        ];
+
+  const scored = new Map<string, { candidate: PaperTradingCandidate; score: number }>();
+  for (const c of candidates) {
+    const s = await scoreShadowCandidate(c.shadowInput);
+    if (!s.success || !s.result) {
+      rejectReasonDistribution.score_failed++;
+      errors.push(`Score failed for ${c.recommendationId}: ${s.error ?? "unknown"}`);
+      continue;
+    }
+    scored.set(c.recommendationId, { candidate: c, score: s.result.shadowMlScore });
+  }
+
+  let openTotal =
+    options.initialOpenTotal ??
+    (await prisma.paperTrade.count({ where: { status: "open" } }));
+  const openByBot = new Map<string, number>();
+  for (const p of effectiveProfiles) {
+    const n =
+      options.initialOpenByBot?.[p.botType] ??
+      (await prisma.paperTrade.count({ where: { status: "open", botType: p.botType } }));
+    openByBot.set(p.botType, n);
+  }
+
+  for (const profile of effectiveProfiles) {
+    const filtered = filterShadowCandidatesForProfileWithDiagnostics(candidates, profile).kept;
+    const keptIds = new Set(filtered.map((x) => x.recommendationId));
+    for (const c of candidates) {
+      if (!keptIds.has(c.recommendationId)) {
+        rejectReasonDistribution.profile_filter++;
+        trace.push({
+          botType: profile.botType,
+          candidateId: c.shadowCandidateId ?? null,
+          recommendationId: c.recommendationId,
+          assetId: c.assetId,
+          marketId: c.marketId,
+          side: c.side,
+          score: scored.get(c.recommendationId)?.score ?? null,
+          admitted: false,
+          rejectReason: "profile_filter",
+        });
+      }
+    }
+
+    const threshold = profile.threshold + profile.minScoreBuffer;
+    const ranked: Array<{ candidate: PaperTradingCandidate; score: number }> = [];
+    for (const c of filtered) {
+      const s = scored.get(c.recommendationId);
+      if (!s) continue;
+      result.candidatesConsidered++;
+      if (s.score < threshold) {
+        rejectReasonDistribution.below_threshold++;
+        trace.push({
+          botType: profile.botType,
+          candidateId: c.shadowCandidateId ?? null,
+          recommendationId: c.recommendationId,
+          assetId: c.assetId,
+          marketId: c.marketId,
+          side: c.side,
+          score: s.score,
+          admitted: false,
+          rejectReason: "below_threshold",
+        });
+        continue;
+      }
+      const spreadBps = parseNum(c.shadowInput.spreadBps);
+      const slippageBps = parseNum(c.shadowInput.estimatedSlippage);
+      const guard = evaluatePaperLiquidityGuards(
+        spreadBps,
+        slippageBps != null ? slippageBps * 10_000 : null,
+        config.paperMaxSpreadBps,
+        config.paperMaxEstimatedSlippageBps
+      );
+      if (!guard.ok) {
+        const reason: PaperTickV1ComparableRejectReason =
+          guard.reason === "spread" ? "liquidity_spread" : "liquidity_slippage";
+        rejectReasonDistribution[reason]++;
+        trace.push({
+          botType: profile.botType,
+          candidateId: c.shadowCandidateId ?? null,
+          recommendationId: c.recommendationId,
+          assetId: c.assetId,
+          marketId: c.marketId,
+          side: c.side,
+          score: s.score,
+          admitted: false,
+          rejectReason: reason,
+        });
+        continue;
+      }
+      ranked.push({ candidate: c, score: s.score });
+    }
+
+    ranked.sort((a, b) =>
+      b.score === a.score
+        ? a.candidate.recommendationId.localeCompare(b.candidate.recommendationId)
+        : b.score - a.score
+    );
+
+    for (const r of ranked) {
+      const perBotOpen = openByBot.get(profile.botType) ?? 0;
+      if (config.maxOpenTotal > 0 && openTotal >= config.maxOpenTotal) {
+        rejectReasonDistribution.global_max_open_total++;
+        trace.push({
+          botType: profile.botType,
+          candidateId: r.candidate.shadowCandidateId ?? null,
+          recommendationId: r.candidate.recommendationId,
+          assetId: r.candidate.assetId,
+          marketId: r.candidate.marketId,
+          side: r.candidate.side,
+          score: r.score,
+          admitted: false,
+          rejectReason: "global_max_open_total",
+        });
+        continue;
+      }
+      if (profile.maxOpenTotal > 0 && perBotOpen >= profile.maxOpenTotal) {
+        rejectReasonDistribution.bot_max_open++;
+        trace.push({
+          botType: profile.botType,
+          candidateId: r.candidate.shadowCandidateId ?? null,
+          recommendationId: r.candidate.recommendationId,
+          assetId: r.candidate.assetId,
+          marketId: r.candidate.marketId,
+          side: r.candidate.side,
+          score: r.score,
+          admitted: false,
+          rejectReason: "bot_max_open",
+        });
+        continue;
+      }
+
+      openTotal += 1;
+      openByBot.set(profile.botType, perBotOpen + 1);
+      result.opened += 1;
+      trace.push({
+        botType: profile.botType,
+        candidateId: r.candidate.shadowCandidateId ?? null,
+        recommendationId: r.candidate.recommendationId,
+        assetId: r.candidate.assetId,
+        marketId: r.candidate.marketId,
+        side: r.candidate.side,
+        score: r.score,
+        admitted: true,
+        rejectReason: null,
+      });
+    }
+  }
+
+  return result;
 }
 
 async function persistOpenTickState(
@@ -2875,6 +3447,7 @@ async function persistOpenTickState(
 
 export interface ClosePaperTradesAt12hResult {
   runAt: string;
+  maxHoldHours: number;
   horizonMs: number;
   openTotalCount: number;
   dueCount: number;
@@ -2898,16 +3471,45 @@ export interface ClosePaperTradesAt12hResult {
  */
 export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResult> {
   const now = new Date();
-  const horizonMs = PAPER_CLOSE_HORIZON_MS;
+  const maxHoldHours = resolvePaperCloseMaxHoldHours();
+  const horizonMs = maxHoldHours * 60 * 60 * 1000;
   const horizonEnd = paperCloseDueBefore(now, horizonMs);
   const errors: string[] = [];
   const closeReasonCounts: Record<string, number> = {};
 
   let openTotalCount = 0;
+  let openUppercaseCount = 0;
   try {
     openTotalCount = await prisma.paperTrade.count({ where: { status: "open" } });
+    // Debug-only: catch casing drift if any writer persisted OPEN instead of open.
+    openUppercaseCount = await prisma.paperTrade.count({ where: { status: "OPEN" } });
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
+  }
+
+  const openTradesForEligibilityDebug = await prisma.paperTrade.findMany({
+    where: { status: "open" },
+    select: { id: true, entryTime: true },
+    orderBy: { entryTime: "asc" },
+  });
+  for (const t of openTradesForEligibilityDebug) {
+    const ageMs = now.getTime() - t.entryTime.getTime();
+    const ageHours = ageMs / (60 * 60 * 1000);
+    const eligibleForClose = ageMs >= horizonMs;
+    const reason = eligibleForClose
+      ? "age_gte_max_hold"
+      : ageMs < 0
+        ? "entryTime_in_future"
+        : "age_lt_max_hold";
+    console.info("[paper-trading] close eligibility debug", {
+      tradeId: t.id,
+      entryTime: t.entryTime.toISOString(),
+      now: now.toISOString(),
+      ageHours,
+      maxHoldHours,
+      eligibleForClose,
+      reason,
+    });
   }
 
   const openTrades = await prisma.paperTrade.findMany({
@@ -2915,19 +3517,50 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
     orderBy: { entryTime: "asc" },
   });
   const dueCount = openTrades.length;
+  console.info("[paper-trading] close candidates fetched", {
+    fetchedForClose: dueCount,
+    whereStatus: "open",
+    whereEntryTimeLte: horizonEnd.toISOString(),
+    unexpectedStatusOPENCount: openUppercaseCount,
+  });
+  console.info("[paper-trading] closing eligible trades", {
+    totalOpen: openTotalCount,
+    eligibleForClose: dueCount,
+    actuallyClosed: 0,
+  });
 
   let closed = 0;
   let closedWithMarkout = 0;
   let closedWithoutMarkout = 0;
+  let attemptedToClose = 0;
+  let successfullyUpdated = 0;
 
   for (const t of openTrades) {
     try {
+      const current = await prisma.paperTrade.findUnique({
+        where: { id: t.id },
+        select: { status: true },
+      });
+      console.info("[paper-trading] close status check", {
+        id: t.id,
+        dbStatus: current?.status ?? null,
+      });
+
       const at12h = new Date(t.entryTime.getTime() + horizonMs);
+      const ageMinutes = (now.getTime() - t.entryTime.getTime()) / (60 * 1000);
       const price0 = parseNum(t.entryPrice);
 
       if (price0 == null || price0 <= 0) {
-        await prisma.paperTrade.update({
-          where: { id: t.id },
+        attemptedToClose++;
+        console.info("[paper-trading] close candidate", {
+          id: t.id,
+          ageMinutes: Number(ageMinutes.toFixed(2)),
+          exitPrice: null,
+          proceedsToUpdate: true,
+          reason: "no_entry_price",
+        });
+        const um = await prisma.paperTrade.updateMany({
+          where: { id: t.id, status: { in: ["open", "OPEN"] } },
           data: {
             status: "closed",
             exitTime: new Date(),
@@ -2937,16 +3570,30 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
             }),
           },
         });
+        if (um.count === 0) {
+          console.warn("[paper-trading] close update skipped (already not open)", { id: t.id });
+          continue;
+        }
+        successfullyUpdated++;
         closed++;
         closedWithoutMarkout++;
         closeReasonCounts.no_entry_price = (closeReasonCounts.no_entry_price ?? 0) + 1;
+        console.info("[paper-trading] trade closed", { id: t.id });
         continue;
       }
 
       const exit = await resolvePaperTradeCloseExitPrice(t.marketId, t.assetId, at12h);
       if (!exit) {
-        await prisma.paperTrade.update({
-          where: { id: t.id },
+        attemptedToClose++;
+        console.info("[paper-trading] close candidate", {
+          id: t.id,
+          ageMinutes: Number(ageMinutes.toFixed(2)),
+          exitPrice: null,
+          proceedsToUpdate: true,
+          reason: "no_exit_price_snapshot",
+        });
+        const um = await prisma.paperTrade.updateMany({
+          where: { id: t.id, status: { in: ["open", "OPEN"] } },
           data: {
             status: "closed",
             exitTime: new Date(),
@@ -2957,12 +3604,18 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
             }),
           },
         });
+        if (um.count === 0) {
+          console.warn("[paper-trading] close update skipped (already not open)", { id: t.id });
+          continue;
+        }
+        successfullyUpdated++;
         closed++;
         closedWithoutMarkout++;
         closeReasonCounts.no_exit_price_snapshot = (closeReasonCounts.no_exit_price_snapshot ?? 0) + 1;
         console.warn(
           `[paper-trading] Closed paper trade id=${t.id} without markout (no MarketPriceSnapshot for market/asset)`
         );
+        console.info("[paper-trading] trade closed", { id: t.id });
         continue;
       }
 
@@ -2977,8 +3630,16 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
             : "markout_snapshot_latest_any";
       closeReasonCounts[markoutKey] = (closeReasonCounts[markoutKey] ?? 0) + 1;
 
-      await prisma.paperTrade.update({
-        where: { id: t.id },
+      attemptedToClose++;
+      console.info("[paper-trading] close candidate", {
+        id: t.id,
+        ageMinutes: Number(ageMinutes.toFixed(2)),
+        exitPrice: exit.price,
+        proceedsToUpdate: true,
+        reason: "with_exit_snapshot",
+      });
+      const um = await prisma.paperTrade.updateMany({
+        where: { id: t.id, status: { in: ["open", "OPEN"] } },
         data: {
           status: "closed",
           exitPrice: String(exit.price),
@@ -2993,12 +3654,18 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
           }),
         },
       });
+      if (um.count === 0) {
+        console.warn("[paper-trading] close update skipped (already not open)", { id: t.id });
+        continue;
+      }
+      successfullyUpdated++;
       closed++;
       if (pnlPct != null) closedWithMarkout++;
       else closedWithoutMarkout++;
       console.log(
         `[paper-trading] Closed paper trade id=${t.id} markout12h=${pnlPct} exitSource=${exit.source}`
       );
+      console.info("[paper-trading] trade closed", { id: t.id });
     } catch (e) {
       errors.push(`Trade ${t.id}: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -3006,6 +3673,7 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
 
   const result: ClosePaperTradesAt12hResult = {
     runAt: now.toISOString(),
+    maxHoldHours,
     horizonMs,
     openTotalCount,
     dueCount,
@@ -3020,11 +3688,23 @@ export async function closePaperTradesAt12h(): Promise<ClosePaperTradesAt12hResu
   console.info("[paper-trading] paper_trading_close_due summary", {
     openTotalCount,
     dueCount,
+    attemptedToClose,
+    successfullyUpdated,
     closed,
     closedWithMarkout,
     closedWithoutMarkout,
     closeReasonCounts,
     errorCount: errors.length,
+  });
+  console.info("[paper-trading] closing eligible trades", {
+    totalOpen: openTotalCount,
+    eligibleForClose: dueCount,
+    actuallyClosed: successfullyUpdated,
+  });
+  console.info("[paper-trading] close summary", {
+    totalCandidatesFetched: dueCount,
+    totalAttemptedToClose: attemptedToClose,
+    totalSuccessfullyUpdated: successfullyUpdated,
   });
 
   const MAX_ERRORS_IN_STATE = 40;

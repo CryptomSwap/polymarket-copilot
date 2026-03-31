@@ -22,7 +22,9 @@
     "dump:runtime-safety-block-report": "npx tsx tools/create-runtime-safety-block-report.ts",
     "dump:reconciliation-drift-debug-report": "npx tsx tools/create-reconciliation-drift-debug-report.ts",
     "dump:user-feed-freshness-debug-report": "npx tsx tools/create-user-feed-freshness-debug-report.ts",
-    "dump:exchange-credential-readiness-report": "npx tsx tools/create-exchange-credential-readiness-report.ts"
+    "dump:exchange-credential-readiness-report": "npx tsx tools/create-exchange-credential-readiness-report.ts",
+    "paper:tick:v2": "npx tsx tools/run-paper-tick-v2.ts",
+    "paper:tick:compare-v1-v2": "npx tsx tools/compare-paper-tick-v1-v2.ts"
     ,
     "dump:exchange-truth-availability-report": "npx tsx tools/create-exchange-truth-availability-report.ts",
     "dump:user-truth-availability-report": "npx tsx tools/create-user-truth-availability-report.ts",

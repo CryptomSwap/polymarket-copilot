@@ -134,7 +134,8 @@ export const BOT_PROFILES: BotProfile[] = [
     excludedCategories: [],
     cooldownHours: 24,
     cooldownMarketHours: 12,
-    maxOpenTotal: 15,
+    // TEMP: increased for V2 evaluation to unblock capacity
+    maxOpenTotal: 30,
     maxOpenPerMarket: 1,
     maxOpenPerTheme: 20,
     maxOpenPerCategory: 40,
@@ -159,7 +160,8 @@ export const BOT_PROFILES: BotProfile[] = [
     excludedCategories: [],
     cooldownHours: 12,
     cooldownMarketHours: 4,
-    maxOpenTotal: 15,
+    // TEMP: increased for V2 evaluation to unblock capacity
+    maxOpenTotal: 30,
     maxOpenPerMarket: 3,
     maxOpenPerTheme: 50,
     maxOpenPerCategory: 80,
@@ -189,7 +191,8 @@ export const BOT_PROFILES: BotProfile[] = [
     excludedCategories: [],
     cooldownHours: 24,
     cooldownMarketHours: 24,
-    maxOpenTotal: 15,
+    // TEMP: increased for V2 evaluation to unblock capacity
+    maxOpenTotal: 30,
     maxOpenPerMarket: 2,
     maxOpenPerTheme: 25,
     maxOpenPerCategory: 40,

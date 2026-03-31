@@ -133,6 +133,60 @@ const RUNTIME_RECONCILE_INTERVAL_MS = 60_000;
 /** Consider reconciliation "stale" if last success is older than this. */
 const RECONCILE_FRESHNESS_MS = 120_000;
 
+/**
+ * Deterministic reco-thesis root keys for `decisionSnapshotJson` (paper/shadow pipeline).
+ * Uses only runtime intent context — no ML. Returns `{}` on any failure so snapshots stay valid.
+ */
+function recoThesisFieldsForRuntimeDecisionSnapshot(input: {
+  strategyId: string;
+  side: "BUY" | "SELL";
+  limitPrice: unknown;
+  action: string;
+  context: { assetLiveState?: unknown };
+}): Record<string, string> {
+  try {
+    let quoteMid: number | null = null;
+    try {
+      const a = input.context?.assetLiveState as { quote?: { mid?: number | null } } | null | undefined;
+      const m = a?.quote?.mid;
+      if (typeof m === "number" && Number.isFinite(m)) quoteMid = m;
+    } catch {
+      /* ignore mid extraction */
+    }
+
+    const p =
+      typeof input.limitPrice === "number" && Number.isFinite(input.limitPrice) ? input.limitPrice : NaN;
+    const sid = String(input.strategyId ?? "").toLowerCase();
+
+    let strategyVariant: "momentum" | "mean_reversion" | "event" | "other" = "other";
+    if (sid.includes("momentum")) strategyVariant = "momentum";
+    else if (sid.includes("revert") || sid.includes("mean_rev") || sid.includes("meanreversion")) {
+      strategyVariant = "mean_reversion";
+    } else if (sid.includes("event")) strategyVariant = "event";
+    else if (!Number.isNaN(p) && quoteMid != null) {
+      const payUp =
+        (input.side === "BUY" && p >= quoteMid - 1e-9) || (input.side === "SELL" && p <= quoteMid + 1e-9);
+      strategyVariant = payUp ? "momentum" : "mean_reversion";
+    } else if (!Number.isNaN(p) && (p <= 0.2 || p >= 0.8)) {
+      strategyVariant = "event";
+    }
+
+    let hypothesisType: "directional" | "probability_mispricing" | "extreme_tail" | "unknown" = "unknown";
+    if (Number.isNaN(p)) hypothesisType = "unknown";
+    else if (p <= 0.08 || p >= 0.92) hypothesisType = "extreme_tail";
+    else if (quoteMid != null && Math.abs(p - quoteMid) >= 0.1) hypothesisType = "probability_mispricing";
+    else hypothesisType = "directional";
+
+    return {
+      strategyFamily: "reco_thesis",
+      strategyVariant,
+      hypothesisType,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export interface StreamRuntimeOptions {
   /** Paper mode only (default true). No live exchange submission. */
   paperMode?: boolean;
@@ -1996,6 +2050,13 @@ export class StreamRuntime {
         terminalModule: string;
         terminalFunction: string;
       }): string => {
+        const recoThesis = recoThesisFieldsForRuntimeDecisionSnapshot({
+          strategyId: payload.strategyId,
+          side: payload.side,
+          limitPrice: payload.limitPrice,
+          action: proposedAction.action,
+          context,
+        });
         return JSON.stringify({
           decidedAt: new Date().toISOString(),
           candidateId: null,
@@ -2044,6 +2105,7 @@ export class StreamRuntime {
             effectiveSingleMarketLimit: concentrationLimitSingleMarketPct,
             effectiveSingleThemeLimit: concentrationLimitSingleThemePct,
           },
+          ...recoThesis,
         });
       };
 

@@ -777,11 +777,15 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
     }
     case "paper_trading_tick": {
       const { runPaperTradingTick } = await import("../paper-trading/engine");
+      const { closePaperTradesAt12h } = await import("../paper-trading/engine");
       // Prefer credentials/wallet funder (same as stream-runtime) so paper candidate load aligns with
       // runtime_automated submissions. Falls back to snapshot heuristic when no wallet funder.
       const { getFunderForPaperTradingTick } = await import("../decision/recompute");
       const funder = await getFunderForPaperTradingTick();
       await runPaperTradingTick(funder ?? undefined);
+      // Closing-only safety: run a due-close pass immediately after each tick so eligible opens,
+      // including V2 rows, are not dependent on the hourly close job cadence.
+      await closePaperTradesAt12h();
       break;
     }
     case "paper_trading_close_due": {

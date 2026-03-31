@@ -21,6 +21,8 @@ export type PaperDecisionRejectReasonCode =
   | "candidate_filter"
   | "spread_guard"
   | "slippage_guard"
+  /** TEMP: paper-only eval gate; revert when directional reco_thesis is re-enabled. */
+  | "directional_temporarily_disabled_for_eval"
   | "unknown_rejection";
 
 export type PaperDecisionFinalDisposition = "admitted" | "rejected";

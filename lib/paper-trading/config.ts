@@ -73,8 +73,8 @@ export const DEFAULT_PAPER_TICK_SHADOW_EXTENDED_LOOKBACK_MINUTES = 720;
 export const DEFAULT_PAPER_TRADING_MIN_SCORE_BUFFER = 0;
 
 /** Max open paper trades globally (0 = no limit; default enables a modest cap for paper capacity). */
-/** Legacy / fallback cap; use env `PAPER_TRADING_MAX_OPEN_TOTAL`. Set ≥ sum of per-bot `maxOpenTotal` when all bots may run (e.g. 3×15=45). */
-export const DEFAULT_PAPER_TRADING_MAX_OPEN_TOTAL = 45;
+/** Legacy / fallback cap; use env `PAPER_TRADING_MAX_OPEN_TOTAL`. Set ≥ sum of per-bot `maxOpenTotal` when all bots may run (e.g. 3×15=45). Default 60 = modest eval headroom when env unset (+33% vs 45); revert by restoring 45. */
+export const DEFAULT_PAPER_TRADING_MAX_OPEN_TOTAL = 60;
 
 /** Max open paper trades per market (0 = no limit). */
 export const DEFAULT_PAPER_TRADING_MAX_OPEN_PER_MARKET = 0;

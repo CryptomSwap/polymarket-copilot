@@ -31,6 +31,48 @@ function parseDecisionSnapshot(json: string | null | undefined): DecisionSnapsho
   }
 }
 
+/** Reco-thesis strings from `ShadowCandidate.decisionSnapshotJson` (root or `recoThesis` / `reco_thesis`). */
+export function parseRecoThesisFromDecisionSnapshotJson(
+  json: string | null | undefined
+): Pick<PaperTradingCandidate, "strategyFamily" | "strategyVariant" | "hypothesisType"> {
+  const out: {
+    strategyFamily?: string;
+    strategyVariant?: string;
+    hypothesisType?: string;
+  } = {};
+  if (!json?.trim()) return out;
+  try {
+    const o = JSON.parse(json) as Record<string, unknown>;
+    const nest = (o.recoThesis ?? o.reco_thesis) as Record<string, unknown> | undefined;
+    const pick = (k: string): string | undefined => {
+      const v = o[k] ?? nest?.[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+      if (typeof v === "number" && Number.isFinite(v)) return String(v);
+      return undefined;
+    };
+    const sf = pick("strategyFamily");
+    const sv = pick("strategyVariant");
+    const ht = pick("hypothesisType");
+    if (sf) out.strategyFamily = sf;
+    if (sv) out.strategyVariant = sv;
+    if (ht) out.hypothesisType = ht;
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+/** Root keys merged into `PaperTrade.metadataJson` before `openAttribution` (omit missing). */
+export function recoThesisMetadataForPaperTrade(
+  c: Pick<PaperTradingCandidate, "strategyFamily" | "strategyVariant" | "hypothesisType">
+): Record<string, unknown> {
+  const m: Record<string, unknown> = {};
+  if (c.strategyFamily?.trim()) m.strategyFamily = c.strategyFamily.trim();
+  if (c.strategyVariant?.trim()) m.strategyVariant = c.strategyVariant.trim();
+  if (c.hypothesisType?.trim()) m.hypothesisType = c.hypothesisType.trim();
+  return m;
+}
+
 /** Prefer DB column; recover marketId from decision JSON when runtime omitted the column. */
 function resolvedMarketIdForShadowRow(r: {
   marketId: string | null;
@@ -283,6 +325,10 @@ export interface PaperTradingCandidate {
   originalBlockingReasons?: string[];
   paperEligibilityVersion?: string;
   derivationSource?: string;
+  /** From shadow `decisionSnapshotJson` when present (reco-thesis attribution). */
+  strategyFamily?: string;
+  strategyVariant?: string;
+  hypothesisType?: string;
 }
 
 /** Options for loading submitted shadow rows for one tick. */
@@ -328,6 +374,14 @@ export interface LoadShadowCandidatesForPaperTickOpts {
   extendedLookbackMinutes?: number;
 }
 
+function parsePriceBoundEnv(key: string, fallback: number): number {
+  const raw = typeof process !== "undefined" ? process.env[key]?.trim() : "";
+  if (!raw) return fallback;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return n;
+}
+
 async function findTopRuntimeShadowSubmitters(
   since: Date,
   take: number
@@ -369,11 +423,136 @@ export async function loadShadowCandidatesForPaperTick(
     preferredFunderTried: preferred,
   });
 
+  const applyMidRangePriceFilter = (payload: {
+    candidates: PaperTradingCandidate[];
+    shadowDiagnostics: ShadowTickLoadDiagnostics;
+  }): { candidates: PaperTradingCandidate[]; shadowDiagnostics: ShadowTickLoadDiagnostics } => {
+    // Bias toward low-probability markets based on observed positive markout in V2 regime.
+    const pool = payload.candidates;
+    const beforeCount = pool.length;
+    type BandKey =
+      | "<0.1"
+      | "0.1-0.3"
+      | "0.3-0.6"
+      | "0.6-0.8"
+      | "0.8-0.9"
+      | ">=0.9"
+      | "unknown";
+    const bandOf = (c: PaperTradingCandidate): BandKey => {
+      const p = parseEntryPrice(c.entryPrice);
+      if (p == null || !Number.isFinite(p)) return "unknown";
+      if (p < 0.1) return "<0.1";
+      if (p < 0.3) return "0.1-0.3";
+      if (p < 0.6) return "0.3-0.6";
+      if (p < 0.8) return "0.6-0.8";
+      if (p < 0.9) return "0.8-0.9";
+      return ">=0.9";
+    };
+    const histogram = (list: PaperTradingCandidate[]): Record<BandKey, number> => {
+      const h: Record<BandKey, number> = {
+        "<0.1": 0,
+        "0.1-0.3": 0,
+        "0.3-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-0.9": 0,
+        ">=0.9": 0,
+        unknown: 0,
+      };
+      for (const c of list) h[bandOf(c)]++;
+      return h;
+    };
+
+    const byBand: Record<BandKey, PaperTradingCandidate[]> = {
+      "<0.1": [],
+      "0.1-0.3": [],
+      "0.3-0.6": [],
+      "0.6-0.8": [],
+      "0.8-0.9": [],
+      ">=0.9": [],
+      unknown: [],
+    };
+    for (const c of pool) byBand[bandOf(c)].push(c);
+
+    // Primary focus: 0.1-0.3.
+    const primary = byBand["0.1-0.3"];
+    const secondary = byBand["0.3-0.6"];
+    const lowerExploration = byBand["<0.1"];
+    const midHigh = byBand["0.6-0.8"];
+    const highDeprioritized = byBand["0.8-0.9"];
+    const tailHigh = byBand[">=0.9"];
+
+    const selected = [...primary];
+    // Exploration: include 0.3-0.6 but cap relative to primary (downweighted by cap).
+    const secondaryCap = Math.max(2, Math.floor(primary.length * 0.5));
+    selected.push(...secondary.slice(0, secondaryCap));
+
+    const expansionThreshold = 10;
+    if (selected.length < expansionThreshold && beforeCount > 0) {
+      // Adaptive widening with low-price-first priority.
+      const need = expansionThreshold - selected.length;
+      selected.push(...lowerExploration.slice(0, need));
+    }
+    if (selected.length < expansionThreshold && beforeCount > 0) {
+      const need = expansionThreshold - selected.length;
+      selected.push(...secondary.slice(secondaryCap, secondaryCap + need));
+    }
+    if (selected.length < expansionThreshold && beforeCount > 0) {
+      const need = expansionThreshold - selected.length;
+      selected.push(...midHigh.slice(0, need));
+    }
+    if (selected.length < expansionThreshold && beforeCount > 0) {
+      const need = expansionThreshold - selected.length;
+      // 0.8-0.9 is heavily deprioritized: include at most 1 only as last-resort expansion.
+      selected.push(...highDeprioritized.slice(0, Math.min(1, need)));
+    }
+    if (selected.length < expansionThreshold && beforeCount > 0) {
+      const need = expansionThreshold - selected.length;
+      selected.push(...tailHigh.slice(0, need));
+    }
+
+    // De-dup if any band spillover appended same row (safety).
+    const seenIds = new Set<string>();
+    const filtered = selected.filter((c) => {
+      const id = c.shadowCandidateId ?? c.recommendationId;
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    });
+
+    console.info("[paper-trading] candidate price-band bias", {
+      phase: "before_filter",
+      totalCandidates: beforeCount,
+      byBand: histogram(pool),
+    });
+    console.info("[paper-trading] candidate price-band bias", {
+      phase: "after_filter",
+      totalCandidates: filtered.length,
+      byBand: histogram(filtered),
+      primaryBand: "0.1-0.3",
+      secondaryBand: "0.3-0.6 (capped exploration)",
+      deprioritizedBand: "0.8-0.9 (last-resort cap<=1)",
+      adaptiveExpansion: "low-first: <0.1 -> extra 0.3-0.6 -> 0.6-0.8 -> 0.8-0.9 -> >=0.9",
+    });
+
+    return {
+      candidates: filtered,
+      shadowDiagnostics: {
+        ...payload.shadowDiagnostics,
+        candidatesLoaded: filtered.length,
+        candidateIds: filtered.map((c) => c.shadowCandidateId!).filter(Boolean),
+        zeroCandidatesReason:
+          filtered.length === 0 && beforeCount > 0
+            ? "price_low_probability_bias_filter_removed_all"
+            : payload.shadowDiagnostics.zeroCandidatesReason,
+      },
+    };
+  };
+
   if (preferred == null) {
     const tops = await findTopRuntimeShadowSubmitters(sinceForTop, 8);
     const topSubmittersByCount = tops.map((t) => ({ funderAddress: t.funderAddress, count: t._count.id }));
     if (tops.length === 0) {
-      return {
+      return applyMidRangePriceFilter({
         candidates: [],
         shadowDiagnostics: {
           shadowRowsQueried: 0,
@@ -390,21 +569,21 @@ export async function loadShadowCandidatesForPaperTick(
           extendedLookbackTriedMinutes: null,
           topSubmittersByCount,
         },
-      };
+      });
     }
     const f = tops[0].funderAddress.toLowerCase();
     const r = await getSubmittedShadowCandidatesForTickWithDiagnostics({
       funderAddress: f,
       lookbackMinutes: windowForTopMinutes,
     });
-    return {
+    return applyMidRangePriceFilter({
       candidates: r.candidates,
       shadowDiagnostics: {
         ...withPreferredMeta(r.shadowDiagnostics),
         topSubmittersByCount,
         usedFunderFallback: false,
       },
-    };
+    });
   }
 
   let r = await getSubmittedShadowCandidatesForTickWithDiagnostics({
@@ -436,7 +615,7 @@ export async function loadShadowCandidatesForPaperTick(
         lookbackMinutes: windowForTopMinutes,
       });
       if (rFb.shadowDiagnostics.shadowRowsQueried > 0) {
-        return {
+        return applyMidRangePriceFilter({
           candidates: rFb.candidates,
           shadowDiagnostics: {
             ...withPreferredMeta(rFb.shadowDiagnostics),
@@ -444,22 +623,22 @@ export async function loadShadowCandidatesForPaperTick(
             topSubmittersByCount,
             extendedLookbackTriedMinutes,
           },
-        };
+        });
       }
     }
-    return {
+    return applyMidRangePriceFilter({
       candidates: r.candidates,
       shadowDiagnostics: {
         ...shadowDiagnostics,
         topSubmittersByCount,
       },
-    };
+    });
   }
 
-  return {
+  return applyMidRangePriceFilter({
     candidates: r.candidates,
     shadowDiagnostics,
-  };
+  });
 }
 
 function dedupeKeyMarketSide(marketId: string, side: string): string {
@@ -573,6 +752,15 @@ export async function getSubmittedShadowCandidatesForTickWithDiagnostics(
     const entryPriceBand = classifyEntryPriceBand(entryPriceNum);
 
     const recommendationId = r.recommendationId?.trim() || `shadow:${r.id}`;
+    const recoThesis = parseRecoThesisFromDecisionSnapshotJson(r.decisionSnapshotJson);
+    if (process.env.PAPER_RECO_THESIS_TRACE === "1") {
+      console.info("[paper-reco-thesis-trace]", {
+        shadowCandidateId: r.id,
+        strategyFamily: recoThesis.strategyFamily ?? null,
+        strategyVariant: recoThesis.strategyVariant ?? null,
+        hypothesisType: recoThesis.hypothesisType ?? null,
+      });
+    }
 
     out.push({
       shadowCandidateId: r.id,
@@ -590,6 +778,7 @@ export async function getSubmittedShadowCandidatesForTickWithDiagnostics(
       paperStagedPolicyState: paperStaged,
       entryPriceBand,
       shadowInput,
+      ...recoThesis,
     });
   }
 
