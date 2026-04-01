@@ -111,6 +111,19 @@ export async function createOrderIntent(input: CreateOrderIntentInput): Promise<
           idempotencyKey,
           orderIntentId: existing.id,
         });
+        if (input.recommendationId && existing.recommendationId == null) {
+          const updated = await prisma.orderIntent.update({
+            where: { id: existing.id },
+            data: {
+              recommendationId: input.recommendationId,
+              ...(input.metadataJson != null && existing.metadataJson == null
+                ? { metadataJson: input.metadataJson }
+                : {}),
+              updatedAt: new Date(),
+            },
+          });
+          return toOrderIntentRecord(updated);
+        }
         return toOrderIntentRecord(existing);
       }
     }
@@ -139,8 +152,20 @@ export async function createOrderIntentIdempotent(input: CreateOrderIntentInput)
       return existing?.id ?? null;
     },
   });
-  const record = await getOrderIntentById(result.id);
+  let record = await getOrderIntentById(result.id);
   if (!record) throw new Error("createOrderIntentIdempotent: getOrderIntentById null after createOrGet");
+  if (result.existing && input.recommendationId && record.recommendationId == null) {
+    await prisma.orderIntent.update({
+      where: { id: record.id },
+      data: {
+        recommendationId: input.recommendationId,
+        ...(input.metadataJson != null && record.metadataJson == null ? { metadataJson: input.metadataJson } : {}),
+        updatedAt: new Date(),
+      },
+    });
+    const again = await getOrderIntentById(record.id);
+    if (again) record = again;
+  }
   return { record, existing: result.existing };
 }
 

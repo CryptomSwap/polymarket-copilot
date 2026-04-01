@@ -3,4 +3,12 @@
  */
 
 export * from "./types";
-export { recordShadowCandidate, type RecordShadowCandidateResult } from "./record";
+export {
+  recordShadowCandidate,
+  isRuntimeAutomatedShadowWriteDisabled,
+  resetRuntimeAutomatedShadowWriteWindowCounters,
+  getRuntimeAutomatedShadowWriteWindowSnapshot,
+  logRuntimeAutomatedShadowWriteWindowAfterPaperTick,
+  warnIfRuntimeAutomatedShadowWritesDisabledAtWorkerBoot,
+  type RecordShadowCandidateResult,
+} from "./record";

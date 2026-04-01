@@ -30,6 +30,13 @@ const STATUS_KEYS = [
 ];
 
 type RawMarket = Record<string, unknown>;
+type RawEvent = Record<string, unknown>;
+
+interface EventGroupingMeta {
+  eventId: string | null;
+  groupKey: string | null;
+  groupTitle: string | null;
+}
 
 /** Fetch raw JSON array from Gamma API (no schema parse). Returns empty array on parse failure. */
 async function fetchGammaMarketsPageRaw(
@@ -66,6 +73,101 @@ async function fetchGammaMarketsPage(
   const parsed = gammaMarketsResponseSchema.safeParse(raw);
   if (!parsed.success) return [];
   return parsed.data;
+}
+
+function normalizeConditionIdLike(value: unknown): string | null {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const t = raw.toLowerCase();
+  if (t.startsWith("0x")) return t;
+  if (/^[0-9a-f]{64}$/.test(t)) return `0x${t}`;
+  return raw;
+}
+
+function pickString(obj: Record<string, unknown> | null, key: string): string | null {
+  if (!obj) return null;
+  const v = obj[key];
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return null;
+}
+
+function deriveGroupKeyFromEvent(rawEvent: RawEvent): { groupKey: string | null; groupTitle: string | null } {
+  const eventId = pickString(rawEvent, "id");
+  const eventTitle = pickString(rawEvent, "title");
+  const seriesRaw = rawEvent.series;
+  let seriesId: string | null = null;
+  let seriesTitle: string | null = null;
+  if (Array.isArray(seriesRaw) && seriesRaw.length > 0 && typeof seriesRaw[0] === "object" && seriesRaw[0] != null) {
+    const s = seriesRaw[0] as Record<string, unknown>;
+    seriesId = pickString(s, "id");
+    seriesTitle = pickString(s, "title");
+  }
+  if (seriesId) return { groupKey: `series:${seriesId}`, groupTitle: seriesTitle ?? eventTitle };
+  if (eventId) return { groupKey: `event:${eventId}`, groupTitle: eventTitle };
+  return { groupKey: null, groupTitle: eventTitle };
+}
+
+async function fetchGammaEventsPageRaw(limit: number, offset: number): Promise<RawEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const url = `${GAMMA_API_BASE}/events?${params.toString()}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`Gamma events API error: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  const rows = Array.isArray(data)
+    ? data
+    : (data as { data?: unknown[]; events?: unknown[] }).data ?? (data as { events?: unknown[] }).events ?? [];
+  return rows.filter((r): r is RawEvent => r != null && typeof r === "object");
+}
+
+export async function buildEventGroupingMaps(opts?: {
+  limit?: number;
+  maxPages?: number;
+}): Promise<{ byConditionId: Map<string, EventGroupingMeta>; bySlug: Map<string, EventGroupingMeta>; errors: string[] }> {
+  const byConditionId = new Map<string, EventGroupingMeta>();
+  const bySlug = new Map<string, EventGroupingMeta>();
+  const errors: string[] = [];
+  const limit = Math.max(1, opts?.limit ?? 200);
+  const maxPages = Math.max(1, opts?.maxPages ?? 20);
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * limit;
+    let events: RawEvent[] = [];
+    try {
+      events = await fetchGammaEventsPageRaw(limit, offset);
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : "Failed to fetch Gamma events");
+      break;
+    }
+    if (events.length === 0) break;
+
+    for (const ev of events) {
+      const eventId = pickString(ev, "id");
+      const eventSlug = pickString(ev, "slug");
+      const group = deriveGroupKeyFromEvent(ev);
+      const meta: EventGroupingMeta = {
+        eventId,
+        groupKey: group.groupKey,
+        groupTitle: group.groupTitle,
+      };
+      if (eventSlug) bySlug.set(eventSlug, meta);
+
+      const markets = Array.isArray(ev.markets) ? ev.markets : [];
+      for (const mk of markets) {
+        if (!mk || typeof mk !== "object") continue;
+        const m = mk as Record<string, unknown>;
+        const conditionId = normalizeConditionIdLike(m.conditionId ?? m.condition_id);
+        if (conditionId) byConditionId.set(conditionId, meta);
+        const marketSlug = pickString(m, "slug");
+        if (marketSlug) bySlug.set(marketSlug, meta);
+      }
+    }
+
+    if (events.length < limit) break;
+  }
+
+  return { byConditionId, bySlug, errors };
 }
 
 function parseEndDate(value: string | null | undefined): Date | null {
@@ -175,6 +277,10 @@ function normalizeGammaMarket(row: GammaMarket): { market: NormalizedMarket; ass
   const category = row.category ?? null;
   const volumeNum = row.volumeNum ?? null;
   const liquidityNum = row.liquidityNum ?? null;
+  const eventIdDirect = pickString(raw, "eventId") ?? pickString(raw, "event_id");
+  const groupIdDirect = pickString(raw, "groupId") ?? pickString(raw, "group_id");
+  const seriesIdDirect = pickString(raw, "seriesId") ?? pickString(raw, "series_id");
+  const directGroupKey = seriesIdDirect ? `series:${seriesIdDirect}` : groupIdDirect ? `group:${groupIdDirect}` : eventIdDirect ? `event:${eventIdDirect}` : null;
 
   let outcomes: string[] = [];
   let outcomePrices: string[] = [];
@@ -202,6 +308,9 @@ function normalizeGammaMarket(row: GammaMarket): { market: NormalizedMarket; ass
 
   const market: NormalizedMarket = {
     conditionId,
+    eventId: eventIdDirect,
+    groupKey: directGroupKey,
+    groupTitle: null,
     slug,
     title,
     status,
@@ -240,6 +349,13 @@ export interface SyncMarketsDiagnostics {
   rawFieldDiagnostics?: RawFieldDiagnostics;
   sampleRawMarkets?: Record<string, unknown>[];
   sampleNormalizedMarkets?: { status: string; endDate: string | null; slug: string | null; reasons?: string[] }[];
+  groupingMetaCoverage?: {
+    byConditionIdCount: number;
+    bySlugCount: number;
+    upsertedWithEventId: number;
+    upsertedWithGroupKey: number;
+    eventFetchErrors: number;
+  };
 }
 
 export interface SyncMarketsResult {
@@ -340,6 +456,10 @@ export async function syncMarkets(opts?: {
   let rawFieldDiagnostics: RawFieldDiagnostics | undefined;
   let sampleRawMarkets: Record<string, unknown>[] | undefined;
   let sampleNormalizedMarkets: { status: string; endDate: string | null; slug: string | null; reasons?: string[] }[] | undefined;
+  let upsertedWithEventId = 0;
+  let upsertedWithGroupKey = 0;
+  const groupingMaps = await buildEventGroupingMaps();
+  errors.push(...groupingMaps.errors);
 
   for (let page = 0; page < maxPages; page++) {
     const offset = (opts?.offset ?? 0) + page * limit;
@@ -370,11 +490,23 @@ export async function syncMarkets(opts?: {
         const { market: norm, assets } = normalizeGammaMarket(row);
         const slugKey = norm.slug ?? norm.conditionId ?? `market-${row.id}`;
         const endDate = norm.endDate ? new Date(norm.endDate) : null;
+        const byCondition = norm.conditionId ? groupingMaps.byConditionId.get(norm.conditionId) : undefined;
+        const bySlug = norm.slug ? groupingMaps.bySlug.get(norm.slug) : undefined;
+        const grouping = byCondition ??
+          bySlug ??
+          (norm.eventId || norm.groupKey
+            ? { eventId: norm.eventId ?? null, groupKey: norm.groupKey ?? null, groupTitle: norm.groupTitle ?? null }
+            : null);
+        if (grouping?.eventId) upsertedWithEventId++;
+        if (grouping?.groupKey) upsertedWithGroupKey++;
 
         const created = await prisma.syncedMarket.upsert({
           where: { slug: slugKey },
           create: {
             conditionId: norm.conditionId ?? undefined,
+            eventId: grouping?.eventId ?? undefined,
+            groupKey: grouping?.groupKey ?? undefined,
+            groupTitle: grouping?.groupTitle ?? undefined,
             slug: slugKey,
             title: norm.title,
             status: norm.status,
@@ -386,6 +518,9 @@ export async function syncMarkets(opts?: {
           },
           update: {
             conditionId: norm.conditionId ?? undefined,
+            eventId: grouping?.eventId ?? undefined,
+            groupKey: grouping?.groupKey ?? undefined,
+            groupTitle: grouping?.groupTitle ?? undefined,
             title: norm.title,
             status: norm.status,
             endDate,
@@ -467,6 +602,13 @@ export async function syncMarkets(opts?: {
     rawFieldDiagnostics,
     sampleRawMarkets,
     sampleNormalizedMarkets,
+    groupingMetaCoverage: {
+      byConditionIdCount: groupingMaps.byConditionId.size,
+      bySlugCount: groupingMaps.bySlug.size,
+      upsertedWithEventId,
+      upsertedWithGroupKey,
+      eventFetchErrors: groupingMaps.errors.length,
+    },
   };
 
   return { synced, errors, diagnostics };
@@ -496,15 +638,28 @@ async function fetchGammaMarketByConditionId(conditionId: string): Promise<Gamma
 }
 
 /** Upsert a single SyncedMarket + SyncedAsset rows from a Gamma market row. Returns created/updated market id. */
-async function upsertOneMarketFromGammaRow(row: GammaMarket): Promise<{ marketId: string; assetCount: number }> {
+async function upsertOneMarketFromGammaRow(
+  row: GammaMarket,
+  groupingMaps?: { byConditionId: Map<string, EventGroupingMeta>; bySlug: Map<string, EventGroupingMeta> }
+): Promise<{ marketId: string; assetCount: number }> {
   const { market: norm, assets } = normalizeGammaMarket(row);
   const slugKey = norm.slug ?? norm.conditionId ?? `market-${row.id}`;
   const endDate = norm.endDate ? new Date(norm.endDate) : null;
+  const byCondition = groupingMaps && norm.conditionId ? groupingMaps.byConditionId.get(norm.conditionId) : undefined;
+  const bySlug = groupingMaps && norm.slug ? groupingMaps.bySlug.get(norm.slug) : undefined;
+  const grouping = byCondition ??
+    bySlug ??
+    (norm.eventId || norm.groupKey
+      ? { eventId: norm.eventId ?? null, groupKey: norm.groupKey ?? null, groupTitle: norm.groupTitle ?? null }
+      : null);
 
   const created = await prisma.syncedMarket.upsert({
     where: { slug: slugKey },
     create: {
       conditionId: norm.conditionId ?? undefined,
+      eventId: grouping?.eventId ?? undefined,
+      groupKey: grouping?.groupKey ?? undefined,
+      groupTitle: grouping?.groupTitle ?? undefined,
       slug: slugKey,
       title: norm.title,
       status: norm.status,
@@ -516,6 +671,9 @@ async function upsertOneMarketFromGammaRow(row: GammaMarket): Promise<{ marketId
     },
     update: {
       conditionId: norm.conditionId ?? undefined,
+      eventId: grouping?.eventId ?? undefined,
+      groupKey: grouping?.groupKey ?? undefined,
+      groupTitle: grouping?.groupTitle ?? undefined,
       title: norm.title,
       status: norm.status,
       endDate,
@@ -609,6 +767,8 @@ export async function backfillHeldMarkets(funderAddress: string): Promise<Backfi
   let fetched = 0;
   let upsertedMarkets = 0;
   let upsertedAssets = 0;
+  const groupingMaps = await buildEventGroupingMaps();
+  errors.push(...groupingMaps.errors);
 
   for (const conditionId of missingConditionIds) {
     try {
@@ -618,7 +778,7 @@ export async function backfillHeldMarkets(funderAddress: string): Promise<Backfi
         continue;
       }
       fetched++;
-      const { marketId: _mid, assetCount } = await upsertOneMarketFromGammaRow(row);
+      const { marketId: _mid, assetCount } = await upsertOneMarketFromGammaRow(row, groupingMaps);
       upsertedMarkets += 1;
       upsertedAssets += assetCount;
     } catch (e) {

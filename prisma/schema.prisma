@@ -38,6 +38,9 @@ model PolymarketApiCredential {
 model SyncedMarket {
   id               String            @id @default(cuid())
   conditionId      String?
+  eventId          String?
+  groupKey         String?
+  groupTitle       String?
   slug             String            @unique
   title            String
   status           String?
@@ -51,6 +54,9 @@ model SyncedMarket {
   updatedAt        DateTime          @updatedAt
   derivedPositions DerivedPosition[]
   assets           SyncedAsset[]
+
+  @@index([eventId])
+  @@index([groupKey])
 }
 
 model SyncedAsset {

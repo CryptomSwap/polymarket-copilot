@@ -60,6 +60,11 @@ export interface ShadowFeatureInput {
   distanceFromMid?: string | null;
   timeToCloseHours?: string | null;
   liquidityTrend?: string | null;
+  // V2 decision-filter context (optional; defaults keep compatibility)
+  scoreThresholdGap?: string | number | null;
+  probabilityBand?: string | null;
+  entryPriceBand?: string | null;
+  botType?: string | null;
 }
 
 export const SHADOW_FEATURE_NAMES: string[] = [
@@ -94,7 +99,48 @@ export const SHADOW_FEATURE_NAMES: string[] = [
   "distanceFromMid",
   "timeToCloseHours",
   "liquidityTrend",
+  "scoreThresholdGap",
+  "probabilityBandLow",
+  "probabilityBandMid",
+  "probabilityBandHigh",
+  "entryPriceBandEnc",
+  "botTypeEnc",
 ];
+
+function probabilityBandOneHot(rawBand: string | null | undefined, intendedPrice: string | null | undefined): [number, number, number] {
+  let band = (rawBand ?? "").toLowerCase().trim();
+  if (!band) {
+    const p = parseNum(intendedPrice);
+    if (p <= 0.2) band = "low";
+    else if (p >= 0.8) band = "high";
+    else band = "mid";
+  }
+  return [band === "low" ? 1 : 0, band === "mid" ? 1 : 0, band === "high" ? 1 : 0];
+}
+
+function encodeEntryPriceBand(raw: string | null | undefined, intendedPrice: string | null | undefined): number {
+  const s = (raw ?? "").toLowerCase().trim();
+  if (s) {
+    if (s.includes("low") || s.includes("0.0-0.2")) return 1;
+    if (s.includes("mid") || s.includes("0.2-0.8")) return 2;
+    if (s.includes("high") || s.includes("0.8-1")) return 3;
+  }
+  const p = parseNum(intendedPrice);
+  if (p <= 0.2) return 1;
+  if (p >= 0.8) return 3;
+  return 2;
+}
+
+function encodeBotType(raw: string | null | undefined): number {
+  const s = (raw ?? "").trim().toLowerCase();
+  if (!s) return 0;
+  let hash = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    hash ^= s.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) % 1000) / 1000;
+}
 
 /**
  * Build numeric feature vector from a training row or scoring context.
@@ -104,6 +150,7 @@ export function toShadowFeatureVector(row: ShadowFeatureInput): number[] {
   const outcomeEnc = row.outcomeBlockedVsAllowedVsSubmitted
     ? (OUTCOME_ENC[row.outcomeBlockedVsAllowedVsSubmitted] ?? 0)
     : 0;
+  const [pLow, pMid, pHigh] = probabilityBandOneHot(row.probabilityBand, row.intendedPrice);
   return [
     parseNum(row.sizeMultiplier),
     parseNum(row.finalSuggestedSize),
@@ -136,5 +183,11 @@ export function toShadowFeatureVector(row: ShadowFeatureInput): number[] {
     parseNum(row.distanceFromMid),
     parseNum(row.timeToCloseHours),
     parseNum(row.liquidityTrend),
+    parseNum(row.scoreThresholdGap),
+    pLow,
+    pMid,
+    pHigh,
+    encodeEntryPriceBand(row.entryPriceBand, row.intendedPrice),
+    encodeBotType(row.botType),
   ];
 }

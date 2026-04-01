@@ -8,6 +8,13 @@
 import { prisma } from "@/lib/db";
 
 const DEBOUNCE_MS = Number(process.env.WS_STATUS_PERSIST_DEBOUNCE_MS ?? "2500") || 2500;
+const LIVE_EVENT_MARKET_FEED_SAMPLE_N =
+  Math.max(1, Number(process.env.LIVE_EVENT_MARKET_FEED_SAMPLE_N ?? "1")) || 1;
+const LIVE_EVENT_SKIP_LOG_INTERVAL_MS = 30_000;
+const ALWAYS_PERSIST_MARKET_EVENT_TYPES = new Set(["trade", "fill"]);
+let marketFeedSampleCounter = 0;
+let skippedLiveEventsSinceLastLog = 0;
+let lastLiveEventSkipLogAtMs = 0;
 
 type MergedWs = {
   connected: boolean;
@@ -147,6 +154,26 @@ export async function persistLiveEvent(params: {
   assetId?: string | null;
   marketId?: string | null;
 }): Promise<void> {
+  if (params.source === "market-feed" && LIVE_EVENT_MARKET_FEED_SAMPLE_N > 1) {
+    const normalizedType = params.eventType.toLowerCase();
+    if (!ALWAYS_PERSIST_MARKET_EVENT_TYPES.has(normalizedType)) {
+      marketFeedSampleCounter += 1;
+      if (marketFeedSampleCounter % LIVE_EVENT_MARKET_FEED_SAMPLE_N !== 0) {
+        skippedLiveEventsSinceLastLog += 1;
+        const nowMs = Date.now();
+        if (nowMs - lastLiveEventSkipLogAtMs >= LIVE_EVENT_SKIP_LOG_INTERVAL_MS) {
+          lastLiveEventSkipLogAtMs = nowMs;
+          console.warn("[live/events] market-feed persistence sampled", {
+            sampleEveryN: LIVE_EVENT_MARKET_FEED_SAMPLE_N,
+            skippedSinceLastLog: skippedLiveEventsSinceLastLog,
+          });
+          skippedLiveEventsSinceLastLog = 0;
+        }
+        return;
+      }
+    }
+  }
+
   const funder = params.funderAddress.toLowerCase();
   try {
     await prisma.liveEvent.create({

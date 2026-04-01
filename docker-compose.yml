@@ -32,6 +32,7 @@ services:
       PORT: "3000"
       USE_STREAM_RUNTIME: ${USE_STREAM_RUNTIME:-true}
       RUNTIME_MODE: ${RUNTIME_MODE:-paper}
+      SHADOW_CANDIDATE_RUNTIME_AUTOMATED_WRITE_DISABLE: ${SHADOW_CANDIDATE_RUNTIME_AUTOMATED_WRITE_DISABLE:-0}
       CHOKIDAR_USEPOLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
@@ -55,6 +56,10 @@ services:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://postgres:postgres@postgres:5432/polymarket_copilot?schema=public}
       USE_STREAM_RUNTIME: ${USE_STREAM_RUNTIME:-true}
       RUNTIME_MODE: ${RUNTIME_MODE:-paper}
+      SHADOW_CANDIDATE_RUNTIME_AUTOMATED_WRITE_DISABLE: ${SHADOW_CANDIDATE_RUNTIME_AUTOMATED_WRITE_DISABLE:-0}
+      # Upstream paper shadow loader: cap extreme-band candidates (<0.1 or >=0.9) before scoring (see lib/paper-trading/candidates.ts).
+      PAPER_SHADOW_EXTREME_BAND_MAX_SHARE: ${PAPER_SHADOW_EXTREME_BAND_MAX_SHARE:-0.25}
+      PAPER_SHADOW_EXTREME_BAND_MAX_COUNT: ${PAPER_SHADOW_EXTREME_BAND_MAX_COUNT:-8}
       NEXT_TELEMETRY_DISABLED: "1"
     volumes:
       - ./:/app

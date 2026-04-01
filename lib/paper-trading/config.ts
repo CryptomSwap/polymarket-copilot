@@ -66,6 +66,8 @@ export const DEFAULT_PAPER_TRADING_COOLDOWN_MARKET_HOURS = 0;
 /** ShadowCandidate createdAt window when loading tick candidates from runtime_automated submissions. */
 export const DEFAULT_PAPER_TRADING_SHADOW_LOOKBACK_MINUTES = 30;
 
+/** Revert upstream breadth: `PAPER_SHADOW_CANDIDATE_EXPANSION_TARGET=10`. Defaults: target 36, max 80, per-market cap 3 (`PAPER_SHADOW_EXPANSION_PER_MARKET_CAP`, 0=off). See `applyMidRangePriceFilter` in `candidates.ts`. */
+
 /** When primary funder returns zero rows, retry with this window (minutes). 0 = skip extended retry. */
 export const DEFAULT_PAPER_TICK_SHADOW_EXTENDED_LOOKBACK_MINUTES = 720;
 

@@ -27,6 +27,40 @@ async function main(): Promise<void> {
   console.log("candidates passed filter:", result.candidatesPassedFilter);
   console.log("trades opened:", result.tradesOpened);
   printDistribution(result.rejectReasonDistribution);
+  if (result.duplicateExposureSuppression) {
+    console.log("duplicate exposure suppression:", JSON.stringify(result.duplicateExposureSuppression));
+  }
+  if (result.dedupeCollisionBreakdown) {
+    console.log("dedupe collision breakdown:", JSON.stringify(result.dedupeCollisionBreakdown));
+  }
+  if (result.scoreProvenanceSample && result.scoreProvenanceSample.length > 0) {
+    console.log("score provenance sample:");
+    for (const r of result.scoreProvenanceSample) {
+      console.log(
+        JSON.stringify(
+          {
+            recommendationId: r.recommendationId,
+            scorerSource: r.scorerSource,
+            structuredBaseScore: r.structuredBaseScore,
+            structuredBlendedScore: r.structuredBlendedScore,
+            rawShadowMlScore: r.shadowMlScoreRaw,
+            shadowMlScoreCalibrated: r.shadowMlScoreCalibrated,
+            band: r.shadowBand,
+            bandRankScore: r.shadowBandRankScore,
+            bandSignal: r.shadowBandSignal,
+            bandPenaltyMultiplier: r.shadowBandPenaltyMultiplier,
+            finalBandAwareScore: r.finalBandAwareScore,
+            actualScoreUsedForOrdering: r.actualScoreUsedForOrdering,
+            actualScoreUsedForThreshold: r.actualScoreUsedForThreshold,
+            thresholdApplied: r.thresholdApplied,
+            outcomes: r.outcomes,
+          },
+          null,
+          0
+        )
+      );
+    }
+  }
 
   if (result.errors.length > 0) {
     console.log("errors:");

@@ -776,6 +776,11 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
       break;
     }
     case "paper_trading_tick": {
+      const {
+        resetRuntimeAutomatedShadowWriteWindowCounters,
+        logRuntimeAutomatedShadowWriteWindowAfterPaperTick,
+      } = await import("../shadow-telemetry/record");
+      resetRuntimeAutomatedShadowWriteWindowCounters();
       const { runPaperTradingTick } = await import("../paper-trading/engine");
       const { closePaperTradesAt12h } = await import("../paper-trading/engine");
       // Prefer credentials/wallet funder (same as stream-runtime) so paper candidate load aligns with
@@ -786,6 +791,7 @@ async function executeJob(name: JobName, ctx: { runId: string; signal: AbortSign
       // Closing-only safety: run a due-close pass immediately after each tick so eligible opens,
       // including V2 rows, are not dependent on the hourly close job cadence.
       await closePaperTradesAt12h();
+      logRuntimeAutomatedShadowWriteWindowAfterPaperTick();
       break;
     }
     case "paper_trading_close_due": {

@@ -1,0 +1,448 @@
+{
+  "generatedAt": "2026-03-31T17:12:05.806Z",
+  "dataSources": {
+    "regimeRows": "PaperTrade where dedupeKey contains '|v2|' and createdAt >= regimeStart",
+    "baselineRows": "PaperTrade closed rows before regimeStart where dedupeKey does not contain '|v2|'",
+    "tickSource": "PaperTradingState.lastOpenTickResultJson (latest persisted open tick only)",
+    "tickShadowJoin": "decisionTraceBundle.traces[].candidateId -> ShadowCandidate.id for intendedPrice bands",
+    "tickBeforeFilterSource": "unavailable (missing lastOpenTickAt or shadowLookbackMinutes)"
+  },
+  "regime": {
+    "regimeStart": "2026-03-30T12:15:04.535Z",
+    "regimeStartSource": "inferred:min(createdAt) where dedupeKey contains |v2|",
+    "cohortSummary": {
+      "totalOpens": 114,
+      "totalClosed": 114,
+      "closeRate": 1,
+      "avgMarkout": 0.010025612373825323,
+      "medianMarkout": 0,
+      "avgRealizedPnlPct": 0.010025612373825323,
+      "avgRealizedPnlDollars": null,
+      "totalRealizedPnlDollars": null,
+      "winRate": 0.3893805309734513,
+      "closedWithMarkout": 113
+    },
+    "baselineSummary": {
+      "totalOpens": 114,
+      "totalClosed": 114,
+      "closeRate": 1,
+      "avgMarkout": 0.0008119378698065074,
+      "medianMarkout": 0,
+      "avgRealizedPnlPct": 0.0008119378698065074,
+      "avgRealizedPnlDollars": null,
+      "totalRealizedPnlDollars": null,
+      "winRate": 0.35135135135135137,
+      "closedWithMarkout": 111
+    },
+    "byPriceBand": [
+      {
+        "band": "<0.1",
+        "openCount": 38,
+        "closedCount": 38,
+        "avgMarkout": -0.0032396271175174256,
+        "medianMarkout": 0,
+        "winRate": 0.10526315789473684,
+        "avgRealizedPnlPct": -0.0032396271175174256
+      },
+      {
+        "band": "0.1-0.2",
+        "openCount": 23,
+        "closedCount": 23,
+        "avgMarkout": 0.0038939931810401626,
+        "medianMarkout": 0,
+        "winRate": 0.4782608695652174,
+        "avgRealizedPnlPct": 0.0038939931810401626
+      },
+      {
+        "band": "0.2-0.3",
+        "openCount": 3,
+        "closedCount": 3,
+        "avgMarkout": 0.2872570194384448,
+        "medianMarkout": 0.2872570194384448,
+        "winRate": 1,
+        "avgRealizedPnlPct": 0.2872570194384448
+      },
+      {
+        "band": "0.3-0.4",
+        "openCount": 2,
+        "closedCount": 2,
+        "avgMarkout": 0,
+        "medianMarkout": 0,
+        "winRate": 0,
+        "avgRealizedPnlPct": 0
+      },
+      {
+        "band": "0.4-0.6",
+        "openCount": 12,
+        "closedCount": 12,
+        "avgMarkout": 0.01699173777597184,
+        "medianMarkout": 0.018691588785046745,
+        "winRate": 0.5833333333333334,
+        "avgRealizedPnlPct": 0.01699173777597184
+      },
+      {
+        "band": "0.6-0.8",
+        "openCount": 12,
+        "closedCount": 12,
+        "avgMarkout": 0.008814102564102535,
+        "medianMarkout": -7.328204783004334e-17,
+        "winRate": 0.25,
+        "avgRealizedPnlPct": 0.008814102564102535
+      },
+      {
+        "band": "0.8-0.9",
+        "openCount": 13,
+        "closedCount": 13,
+        "avgMarkout": -0.0012607607671397956,
+        "medianMarkout": 0.0012106537530266355,
+        "winRate": 0.6153846153846154,
+        "avgRealizedPnlPct": -0.0012607607671397956
+      },
+      {
+        "band": ">=0.9",
+        "openCount": 11,
+        "closedCount": 11,
+        "avgMarkout": 0.0011386933120590415,
+        "medianMarkout": 0.0015380721147249619,
+        "winRate": 0.8,
+        "avgRealizedPnlPct": 0.0011386933120590415
+      }
+    ],
+    "scoreBuckets": [
+      {
+        "bucket": "[0.000, 0.450)",
+        "count": 11,
+        "avgMarkout": 0.005097706032285476,
+        "medianMarkout": 0,
+        "winRate": 0.2727272727272727
+      },
+      {
+        "bucket": "[0.450, 0.478)",
+        "count": 11,
+        "avgMarkout": 0.00012065690215294971,
+        "medianMarkout": 0,
+        "winRate": 0.2727272727272727
+      },
+      {
+        "bucket": "[0.478, 0.525)",
+        "count": 11,
+        "avgMarkout": 0.07636189898884592,
+        "medianMarkout": 0.0029940119760479065,
+        "winRate": 0.5454545454545454
+      },
+      {
+        "bucket": "[0.525, 0.554)",
+        "count": 10,
+        "avgMarkout": -0.0008928571428571437,
+        "medianMarkout": 0,
+        "winRate": 0
+      },
+      {
+        "bucket": "[0.554, 0.998)",
+        "count": 13,
+        "avgMarkout": 0.013239247856049638,
+        "medianMarkout": 0.0012106537530266355,
+        "winRate": 0.5384615384615384
+      },
+      {
+        "bucket": "[0.998, 1.000)",
+        "count": 6,
+        "avgMarkout": 0.0011849715678781136,
+        "medianMarkout": 0.0013611279001606983,
+        "winRate": 1
+      },
+      {
+        "bucket": "[1.000, 1.000)",
+        "count": 51,
+        "avgMarkout": 0.0012788203329174744,
+        "medianMarkout": 0,
+        "winRate": 0.37254901960784315
+      }
+    ],
+    "topVsBottomScoreBuckets": {
+      "k": 22,
+      "top": {
+        "n": 22,
+        "avgMarkout": 0.0008882534518548157,
+        "winRate": 0.4090909090909091
+      },
+      "bottom": {
+        "n": 22,
+        "avgMarkout": 0.002609181467219213,
+        "winRate": 0.2727272727272727
+      }
+    },
+    "crossPriceBandByScoreBucket": [
+      {
+        "priceBand": "<0.1",
+        "scoreBucket": "[0.525, 0.554)",
+        "count": 7,
+        "avgMarkout": -0.0012755102040816339,
+        "winRate": 0
+      },
+      {
+        "priceBand": "<0.1",
+        "scoreBucket": "[0.554, 0.998)",
+        "count": 3,
+        "avgMarkout": 0,
+        "winRate": 0
+      },
+      {
+        "priceBand": "<0.1",
+        "scoreBucket": "[1.000, 1.000)",
+        "count": 25,
+        "avgMarkout": -0.004567090361483629,
+        "winRate": 0.16
+      },
+      {
+        "priceBand": ">=0.9",
+        "scoreBucket": "[0.998, 1.000)",
+        "count": 4,
+        "avgMarkout": 0.0010242394017330805,
+        "winRate": 1
+      },
+      {
+        "priceBand": ">=0.9",
+        "scoreBucket": "[1.000, 1.000)",
+        "count": 4,
+        "avgMarkout": 0.0018224938784145227,
+        "winRate": 1
+      },
+      {
+        "priceBand": "0.1-0.2",
+        "scoreBucket": "[0.450, 0.478)",
+        "count": 3,
+        "avgMarkout": 0,
+        "winRate": 0
+      },
+      {
+        "priceBand": "0.1-0.2",
+        "scoreBucket": "[0.478, 0.525)",
+        "count": 3,
+        "avgMarkout": 0.0029940119760479065,
+        "winRate": 1
+      },
+      {
+        "priceBand": "0.1-0.2",
+        "scoreBucket": "[1.000, 1.000)",
+        "count": 14,
+        "avgMarkout": 0.005755700516841431,
+        "winRate": 0.5714285714285714
+      },
+      {
+        "priceBand": "0.4-0.6",
+        "scoreBucket": "[0.000, 0.450)",
+        "count": 5,
+        "avgMarkout": 0.011214953271028047,
+        "winRate": 0.6
+      },
+      {
+        "priceBand": "0.4-0.6",
+        "scoreBucket": "[1.000, 1.000)",
+        "count": 6,
+        "avgMarkout": 0.017391304347826105,
+        "winRate": 0.5
+      },
+      {
+        "priceBand": "0.6-0.8",
+        "scoreBucket": "[0.450, 0.478)",
+        "count": 3,
+        "avgMarkout": -1.4656409566008667e-16,
+        "winRate": 0
+      },
+      {
+        "priceBand": "0.6-0.8",
+        "scoreBucket": "[0.525, 0.554)",
+        "count": 3,
+        "avgMarkout": 0,
+        "winRate": 0
+      },
+      {
+        "priceBand": "0.6-0.8",
+        "scoreBucket": "[0.554, 0.998)",
+        "count": 3,
+        "avgMarkout": 0.041666666666666706,
+        "winRate": 1
+      },
+      {
+        "priceBand": "0.8-0.9",
+        "scoreBucket": "[0.450, 0.478)",
+        "count": 5,
+        "avgMarkout": 0.0002654451847365773,
+        "winRate": 0.6
+      },
+      {
+        "priceBand": "0.8-0.9",
+        "scoreBucket": "[0.478, 0.525)",
+        "count": 3,
+        "avgMarkout": -0.008120649651972164,
+        "winRate": 0
+      },
+      {
+        "priceBand": "0.8-0.9",
+        "scoreBucket": "[0.554, 0.998)",
+        "count": 3,
+        "avgMarkout": 0.0012106537530266355,
+        "winRate": 1
+      }
+    ]
+  },
+  "recentTickMix": {
+    "latestTickAt": "2026-03-31T17:10:39.849Z",
+    "lastOpenTickError": null,
+    "windowMinutesUsed": null,
+    "funderUsedForLoad": null,
+    "candidateMixBeforeFilter": {
+      "totalCandidates": 0,
+      "byPriceBand": {
+        "<0.1": 0,
+        "0.1-0.2": 0,
+        "0.2-0.3": 0,
+        "0.3-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-0.9": 0,
+        ">=0.9": 0,
+        "unknown": 0
+      }
+    },
+    "candidateMixAfterFilter": {
+      "totalCandidates": 0,
+      "byPriceBand": {
+        "<0.1": 0,
+        "0.1-0.2": 0,
+        "0.2-0.3": 0,
+        "0.3-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-0.9": 0,
+        ">=0.9": 0,
+        "unknown": 0
+      }
+    },
+    "admittedTrades": {
+      "total": 0,
+      "byPriceBand": {
+        "<0.1": 0,
+        "0.1-0.2": 0,
+        "0.2-0.3": 0,
+        "0.3-0.4": 0,
+        "0.4-0.6": 0,
+        "0.6-0.8": 0,
+        "0.8-0.9": 0,
+        ">=0.9": 0,
+        "unknown": 0
+      },
+      "byBotType": {},
+      "byBotTypeByPriceBand": {}
+    },
+    "rejectReasons": [
+      {
+        "reason": "budget_cap",
+        "count": 21
+      },
+      {
+        "reason": "spread_guard",
+        "count": 2
+      }
+    ],
+    "noopReasons": {
+      "zeroCandidatesReason": null,
+      "notes": "Tick result has no explicit noop taxonomy beyond zeroCandidatesReason and rejectReasonCode counts."
+    },
+    "structuredScoreDistribution": {
+      "available": true,
+      "admitted": {
+        "countWithScore": 0,
+        "mean": null,
+        "median": null
+      },
+      "rejected": {
+        "countWithScore": 23,
+        "mean": 0.9655548041348393,
+        "median": 0.9655548041348389
+      }
+    }
+  },
+  "closedCohortRankingQuality": {
+    "cohortSizeClosedWithOutcome": 113,
+    "winnerCount": 44,
+    "loserCount": 69,
+    "winnerScoreMean": 0.7948631401115741,
+    "winnerScoreMedian": 0.9997849209624363,
+    "loserScoreMean": 0.7414512086029219,
+    "loserScoreMedian": 0.7025,
+    "markoutByScoreBucket": [
+      {
+        "bucket": "[0.000, 0.450)",
+        "count": 11,
+        "avgMarkout": 0.005097706032285476,
+        "medianMarkout": 0,
+        "winRate": 0.2727272727272727
+      },
+      {
+        "bucket": "[0.450, 0.478)",
+        "count": 11,
+        "avgMarkout": 0.00012065690215294971,
+        "medianMarkout": 0,
+        "winRate": 0.2727272727272727
+      },
+      {
+        "bucket": "[0.478, 0.525)",
+        "count": 11,
+        "avgMarkout": 0.07636189898884592,
+        "medianMarkout": 0.0029940119760479065,
+        "winRate": 0.5454545454545454
+      },
+      {
+        "bucket": "[0.525, 0.554)",
+        "count": 10,
+        "avgMarkout": -0.0008928571428571437,
+        "medianMarkout": 0,
+        "winRate": 0
+      },
+      {
+        "bucket": "[0.554, 0.998)",
+        "count": 13,
+        "avgMarkout": 0.013239247856049638,
+        "medianMarkout": 0.0012106537530266355,
+        "winRate": 0.5384615384615384
+      },
+      {
+        "bucket": "[0.998, 1.000)",
+        "count": 6,
+        "avgMarkout": 0.0011849715678781136,
+        "medianMarkout": 0.0013611279001606983,
+        "winRate": 1
+      },
+      {
+        "bucket": "[1.000, 1.000)",
+        "count": 51,
+        "avgMarkout": 0.0012788203329174744,
+        "medianMarkout": 0,
+        "winRate": 0.37254901960784315
+      }
+    ],
+    "inBandRankingQuality": [
+      {
+        "band": "0.1-0.2",
+        "count": 23,
+        "highHalfAvgOutcome": 0.004667276468537148,
+        "lowHalfAvgOutcome": 0.0021456289971890368,
+        "highHalfWinRate": 0.5454545454545454,
+        "lowHalfWinRate": 0.36363636363636365
+      },
+      {
+        "band": "0.2-0.3",
+        "count": 3,
+        "note": "insufficient_sample"
+      },
+      {
+        "band": "0.3-0.4",
+        "count": 2,
+        "note": "insufficient_sample"
+      }
+    ],
+    "sampleSizeLimitations": "In-band slices with <6 rows are flagged insufficient_sample."
+  }
+}

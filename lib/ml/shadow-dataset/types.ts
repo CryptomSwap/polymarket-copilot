@@ -104,6 +104,13 @@ export interface BuildShadowTrainingExamplesOptions {
   datasetCandidateSelection?: DatasetCandidateSelectionMode;
   /** Min age before a candidate is eligible for truthful 12h labeling (default 12h). */
   minAgeMsFor12hLabel?: number;
+  /**
+   * Prefer strict PaperTrade linkage for 12h labels (recommendationId+assetId+side within join lag window).
+   * Falls back to snapshot-derived markout12h when no strict link exists.
+   */
+  strictPaperLabelJoin?: boolean;
+  /** Max lag between ShadowCandidate.createdAt and PaperTrade.entryTime for strict linkage (default 60m). */
+  strictPaperJoinMaxLagMs?: number;
 }
 
 export interface BuildShadowTrainingExamplesResult {

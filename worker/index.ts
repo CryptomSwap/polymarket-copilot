@@ -28,6 +28,7 @@ import {
 import { JOB_NAMES, JOB_INTERVALS_MS, runJob, type JobName } from "./jobs";
 import { prisma } from "../lib/db";
 import { consoleMethodForLevel, getLogLevelFromEnv, shouldEmitLog, type LogLevel } from "../lib/logging/log-level";
+import { warnIfRuntimeAutomatedShadowWritesDisabledAtWorkerBoot } from "@/lib/shadow-telemetry/record";
 
 const WORKER_NAME = "polymarket-copilot-worker";
 const USE_STREAM_RUNTIME = process.env.USE_STREAM_RUNTIME === "true";
@@ -269,6 +270,7 @@ function main(): void {
   }
 
   scheduleJobs();
+  warnIfRuntimeAutomatedShadowWritesDisabledAtWorkerBoot();
 
   // Freshness-aware eager triggering for user_sync. This keeps lastSuccessfulUserTruthFetchAt fresh
   // even when the user WS has no real order/fill messages (lastDataEventAt stays null).

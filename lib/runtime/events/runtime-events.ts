@@ -172,6 +172,8 @@ export interface OrderIntentCreatedPayload {
   limitPrice: number;
   /** Optional idempotency key. */
   intentId?: string;
+  /** When set, persisted on `OrderIntent` and used for idempotency key segment. */
+  recommendationId?: string | null;
 }
 
 /** Read-only decision evaluation telemetry (no order placed). */

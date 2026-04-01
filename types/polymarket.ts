@@ -55,6 +55,9 @@ export const gammaMarketsResponseSchema = z.array(gammaMarketSchema);
 
 export const normalizedMarketSchema = z.object({
   conditionId: z.string().nullable(),
+  eventId: z.string().nullable().optional(),
+  groupKey: z.string().nullable().optional(),
+  groupTitle: z.string().nullable().optional(),
   slug: z.string().nullable(),
   title: z.string(),
   status: z.string(),

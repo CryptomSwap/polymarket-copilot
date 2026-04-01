@@ -87,6 +87,7 @@ import {
   markExecutedOrderStatus,
 } from "@/lib/execution-ledger/service";
 import { buildRuntimeIntentIdempotencyKey } from "@/lib/execution-ledger/idempotency";
+import { resolveRuntimeIntentRecommendationLink } from "@/lib/runtime/intent-recommendation-link";
 import type { CreateOrderIntentInput } from "@/lib/execution-ledger/types";
 import { runRuntimeReconciliation } from "@/lib/runtime/reconciliation/runtime-reconciliation";
 import type { RuntimeReconciliationResult } from "@/lib/runtime/reconciliation/runtime-reconciliation-types";
@@ -2148,6 +2149,32 @@ export class StreamRuntime {
         result.verdict === "allowed" ||
         (result.verdict === "cancel_only" && proposedAction.action === "CANCEL_ORDERS") ||
         allowReduceOnly;
+
+      const funder = payload.funderAddress.toLowerCase().trim();
+      const outcome = payload.side === "BUY" ? "YES" : "NO";
+      const payloadRecId =
+        (payload as { recommendationId?: string | null }).recommendationId?.trim() || null;
+      let runtimeIntentLink: Awaited<ReturnType<typeof resolveRuntimeIntentRecommendationLink>> = null;
+      if (!payloadRecId && payload.marketId) {
+        runtimeIntentLink = await resolveRuntimeIntentRecommendationLink({
+          funderAddress: funder,
+          marketId: payload.marketId,
+          outcome,
+        });
+      }
+      const resolvedRecommendationId = payloadRecId ?? runtimeIntentLink?.recommendationId ?? null;
+      const runtimeIntentMetadataJson =
+        runtimeIntentLink && !payloadRecId
+          ? JSON.stringify({
+              linkage: {
+                source: "resolveRuntimeIntentRecommendationLink",
+                theme: runtimeIntentLink.theme || undefined,
+                category: runtimeIntentLink.category || undefined,
+                marketTitle: runtimeIntentLink.marketTitle || undefined,
+              },
+            })
+          : undefined;
+
       if (!allowed) {
         diagnostics.recordIntentBlockedByGuardrails();
         const freshnessCodes = result.reasonCodes.filter(
@@ -2236,7 +2263,7 @@ export class StreamRuntime {
         });
         void recordShadowCandidate({
           funderAddress: payload.funderAddress,
-          recommendationId: (payload as { recommendationId?: string }).recommendationId ?? null,
+          recommendationId: resolvedRecommendationId,
           orderIntentId: payload.intentId ?? null,
           assetId: payload.assetId,
           marketId: payload.marketId,
@@ -2275,12 +2302,10 @@ export class StreamRuntime {
         return;
       }
 
-      const funder = payload.funderAddress.toLowerCase().trim();
-      const outcome = payload.side === "BUY" ? "YES" : "NO";
       const idempotencyKey = buildRuntimeIntentIdempotencyKey({
         funderAddress: funder,
         source: "runtime_automated",
-        recommendationId: (payload as { recommendationId?: string }).recommendationId ?? null,
+        recommendationId: payloadRecId,
         assetId: payload.assetId,
         side: payload.side,
         orderType: "LIMIT",
@@ -2290,7 +2315,7 @@ export class StreamRuntime {
       });
       const intentInput: CreateOrderIntentInput = {
         funderAddress: funder,
-        recommendationId: (payload as { recommendationId?: string }).recommendationId ?? null,
+        recommendationId: resolvedRecommendationId,
         source: "runtime_automated",
         marketId: payload.marketId,
         assetId: payload.assetId,
@@ -2301,6 +2326,7 @@ export class StreamRuntime {
         requestedSize: String(payload.size),
         status: "created",
         idempotencyKey,
+        metadataJson: runtimeIntentMetadataJson,
       };
       let ledgerIntent: { id: string };
       try {
@@ -2417,6 +2443,68 @@ export class StreamRuntime {
         executionQuality: policyExecutionQuality,
       };
       const policyResult = evaluateExecutionPolicy(policyInput);
+      const policyReasonTokens = policyResult.blockingReasons
+        .flatMap((r) =>
+          String(r)
+            .split(";")
+            .map((p) => p.trim())
+            .filter(Boolean)
+        )
+        .map((t) => t.toLowerCase());
+      const concentrationTokens = policyReasonTokens.filter(
+        (t) =>
+          t.includes("single_market_concentration_breach") || t.includes("single_theme_concentration_breach")
+      );
+      const hasConcentrationReasons = concentrationTokens.length > 0;
+      const operationalHardBlock = policyReasonTokens.some(
+        (t) =>
+          t.startsWith("operational:") ||
+          t.includes("kill_switch") ||
+          t.includes("runtime_safety_blocked") ||
+          t.includes("runtime_safety_kill_switch") ||
+          t.includes("missing_credentials") ||
+          t.includes("exchange_truth_unavailable") ||
+          t.includes("missing_market_or_asset_resolution")
+      );
+      const nonConcentrationReasons = policyReasonTokens.filter(
+        (t) =>
+          !(
+            t.includes("single_market_concentration_breach") || t.includes("single_theme_concentration_breach")
+          )
+      );
+      const softenConcentrationInPaper =
+        paperMode &&
+        process.env.PAPER_EXECUTION_POLICY_SOFTEN_CONCENTRATION === "1" &&
+        hasConcentrationReasons &&
+        nonConcentrationReasons.length === 0 &&
+        !operationalHardBlock;
+      const policyDecisionMeta = {
+        concentrationSoftened: softenConcentrationInPaper,
+        softenedReasons: softenConcentrationInPaper ? concentrationTokens : [],
+        originalWouldBlock: !policyResult.allow,
+        operationalHardBlock,
+      };
+      const effectivePolicyAllow = policyResult.allow || softenConcentrationInPaper;
+      const effectivePolicyState = effectivePolicyAllow
+        ? softenConcentrationInPaper
+          ? "warn"
+          : policyResult.policyState
+        : policyResult.policyState;
+      const effectivePolicyWarnings = softenConcentrationInPaper
+        ? [...policyResult.warnings, "paper_softened_concentration"]
+        : policyResult.warnings;
+      const effectivePolicySnapshotJson = (() => {
+        try {
+          const parsed = JSON.parse(policyResult.snapshotJson) as Record<string, unknown>;
+          parsed.policyState = effectivePolicyState;
+          parsed.allow = effectivePolicyAllow;
+          parsed.warnings = effectivePolicyWarnings;
+          parsed.decisionMeta = policyDecisionMeta;
+          return JSON.stringify(parsed);
+        } catch {
+          return policyResult.snapshotJson;
+        }
+      })();
       const concentrationInputSnapshotJson = portfolioRisk
         ? JSON.stringify({
             computedAt: portfolioRisk.computedAt,
@@ -2430,12 +2518,13 @@ export class StreamRuntime {
             },
           })
         : null;
-      if (!policyResult.allow) {
+      if (!effectivePolicyAllow) {
         diagnostics.log("debug", "ShadowCandidate blocked by execution policy (diagnostics)", {
           source: "execution_policy",
           runtimeGuardrailsAllowed: true,
           policyBlockingReasons: policyResult.blockingReasons,
           policyState: policyResult.policyState,
+          ...policyDecisionMeta,
           paperMode,
           paperModeRelaxationAppliedToPolicyInput: paperMode,
           operationalReconciliationDriftRaw,
@@ -2446,7 +2535,7 @@ export class StreamRuntime {
         });
         void recordShadowCandidate({
           funderAddress: payload.funderAddress,
-          recommendationId: (payload as { recommendationId?: string }).recommendationId ?? null,
+          recommendationId: resolvedRecommendationId,
           orderIntentId: ledgerIntent.id,
           assetId: payload.assetId,
           marketId: payload.marketId,
@@ -2462,7 +2551,7 @@ export class StreamRuntime {
             terminalModule: "lib/execution-policy/evaluate.ts",
             terminalFunction: "evaluateExecutionPolicy",
           }),
-          executionPolicySnapshotJson: policyResult.snapshotJson,
+          executionPolicySnapshotJson: effectivePolicySnapshotJson,
           executionQualitySnapshotJson: eqRecord.snapshotJson,
           portfolioRiskSnapshotJson: concentrationInputSnapshotJson,
           runtimeSafetySnapshotJson: JSON.stringify({
@@ -2478,7 +2567,7 @@ export class StreamRuntime {
         void appendIntentBlockedEvent(
           ledgerIntent.id,
           "EXECUTION_POLICY_BLOCKED",
-          JSON.stringify({ blockingReasons: policyResult.blockingReasons }),
+          JSON.stringify({ blockingReasons: policyResult.blockingReasons, ...policyDecisionMeta }),
           "blocked"
         ).catch(() => {});
         diagnostics.log("debug", "Intent blocked by execution policy", {
@@ -2489,18 +2578,19 @@ export class StreamRuntime {
         });
         return;
       }
-      if (policyResult.warnings.length > 0) {
+      if (effectivePolicyWarnings.length > 0) {
         diagnostics.log("debug", "Execution policy warnings", {
-          warnings: policyResult.warnings,
+          warnings: effectivePolicyWarnings,
+          ...policyDecisionMeta,
           assetId: payload.assetId,
         });
       }
       try {
-        await persistExecutionPolicyPassed(ledgerIntent.id, policyResult.snapshotJson);
+        await persistExecutionPolicyPassed(ledgerIntent.id, effectivePolicySnapshotJson);
         await appendOrderIntentEventToLedger({
           orderIntentId: ledgerIntent.id,
           eventType: "READY_FOR_RECONCILIATION",
-          payloadJson: null,
+          payloadJson: JSON.stringify(policyDecisionMeta),
         });
       } catch (err) {
         diagnostics.log("error", "Persist policy passed failed", {
@@ -2527,13 +2617,14 @@ export class StreamRuntime {
         });
       }
       diagnostics.log("debug", "Execution policy allow", {
-        policyState: policyResult.policyState,
+        policyState: effectivePolicyState,
+        ...policyDecisionMeta,
         assetId: payload.assetId,
       });
 
       void recordShadowCandidate({
         funderAddress: payload.funderAddress,
-        recommendationId: (payload as { recommendationId?: string }).recommendationId ?? null,
+        recommendationId: resolvedRecommendationId,
         orderIntentId: ledgerIntent.id,
         assetId: payload.assetId,
         marketId: payload.marketId,
@@ -2544,12 +2635,12 @@ export class StreamRuntime {
         decisionSnapshotJson: buildDecisionContextSnapshot({
           wasBlocked: false,
           wasSubmitted: true,
-          conciseBlockingReasons: [],
+            conciseBlockingReasons: softenConcentrationInPaper ? concentrationTokens : [],
           terminalStage: "execution_policy_allow",
           terminalModule: "lib/execution-policy/evaluate.ts",
           terminalFunction: "evaluateExecutionPolicy",
         }),
-        executionPolicySnapshotJson: policyResult.snapshotJson,
+          executionPolicySnapshotJson: effectivePolicySnapshotJson,
         executionQualitySnapshotJson: eqRecord.snapshotJson,
         portfolioRiskSnapshotJson: concentrationInputSnapshotJson,
         runtimeSafetySnapshotJson: JSON.stringify({

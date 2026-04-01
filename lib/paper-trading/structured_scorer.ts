@@ -24,6 +24,9 @@ export interface StructuredScoringModel {
 
 export interface StructuredScoredCandidate {
   candidate: PaperTradingCandidate;
+  baseScore: number;
+  bandRankScore: number;
+  bandSignal: number;
   score: number;
   linear: number;
   priceBand: StructuredPriceBand;
@@ -88,6 +91,33 @@ function sigmoid(x: number): number {
   if (x > 30) return 1;
   if (x < -30) return 0;
   return 1 / (1 + Math.exp(-x));
+}
+
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0.5;
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  return x;
+}
+
+function parseWeightEnv(key: string, fallback: number): number {
+  const raw = process.env[key]?.trim();
+  if (!raw) return fallback;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function parseBandSignalEnv(band: StructuredPriceBand, fallback: number): number {
+  const keyMap: Record<StructuredPriceBand, string> = {
+    "0.2-0.35": "PAPER_STRUCTURED_BAND_SIGNAL_02_035",
+    "0.35-0.5": "PAPER_STRUCTURED_BAND_SIGNAL_035_05",
+    "0.5-0.65": "PAPER_STRUCTURED_BAND_SIGNAL_05_065",
+    "0.65-0.8": "PAPER_STRUCTURED_BAND_SIGNAL_065_08",
+  };
+  const raw = process.env[keyMap[band]]?.trim();
+  if (!raw) return fallback;
+  const n = parseFloat(raw);
+  return clamp01(n);
 }
 
 function resolvePriceBand(price: number): StructuredPriceBand {
@@ -309,7 +339,7 @@ export function scoreStructuredCandidates(
   model: StructuredScoringModel,
   externalByRecommendationId?: Record<string, ExternalSignalFeatureVector>
 ): StructuredScoredCandidate[] {
-  return candidates.map((c) => {
+  const scoredBase = candidates.map((c) => {
     const price = parseNum(c.entryPrice) ?? parseNum(c.shadowInput.intendedPrice) ?? 0.5;
     const spread = parseNum(c.shadowInput.spreadBps);
     const band = resolvePriceBand(Math.max(model.midRangeMin, Math.min(model.midRangeMax, price)));
@@ -329,10 +359,9 @@ export function scoreStructuredCandidates(
       model.optionalWeights.priceDriftSignal * extDrift;
 
     const z = (linear - model.globalMeanOutcome) / model.globalStdOutcome;
-    const score = sigmoid(z);
     return {
       candidate: c,
-      score,
+      baseScore: sigmoid(z),
       linear,
       priceBand: band,
       spreadQuartile: q,
@@ -342,6 +371,59 @@ export function scoreStructuredCandidates(
             priceDriftSignal: ext.priceDriftSignal,
           }
         : null,
+    };
+  });
+
+  // Cross-band normalization: preserve in-band rank while making scores comparable globally.
+  const bandSignalDefaults: Record<StructuredPriceBand, number> = {
+    // Evidence-guided monotonic prior: (0.4-0.6 strongest) > (0.6-0.8) > (0.1-0.2/low bands).
+    "0.35-0.5": 1.0,
+    "0.5-0.65": 0.9,
+    "0.65-0.8": 0.7,
+    "0.2-0.35": 0.4,
+  };
+  const bandSignal: Record<StructuredPriceBand, number> = {
+    "0.2-0.35": parseBandSignalEnv("0.2-0.35", bandSignalDefaults["0.2-0.35"]),
+    "0.35-0.5": parseBandSignalEnv("0.35-0.5", bandSignalDefaults["0.35-0.5"]),
+    "0.5-0.65": parseBandSignalEnv("0.5-0.65", bandSignalDefaults["0.5-0.65"]),
+    "0.65-0.8": parseBandSignalEnv("0.65-0.8", bandSignalDefaults["0.65-0.8"]),
+  };
+  const wBand = parseWeightEnv("PAPER_STRUCTURED_GLOBAL_BAND_WEIGHT", 0.5);
+  const wRank = parseWeightEnv("PAPER_STRUCTURED_GLOBAL_RANK_WEIGHT", 0.5);
+  const wNorm = Math.max(1e-9, wBand + wRank);
+
+  const byBand = new Map<StructuredPriceBand, typeof scoredBase>();
+  for (const s of scoredBase) {
+    const arr = byBand.get(s.priceBand) ?? [];
+    arr.push(s);
+    byBand.set(s.priceBand, arr);
+  }
+
+  const bandRankByRecommendationId = new Map<string, number>();
+  for (const [, arr] of byBand.entries()) {
+    const sorted = [...arr].sort((a, b) => {
+      if (a.baseScore !== b.baseScore) return a.baseScore - b.baseScore;
+      return a.candidate.recommendationId.localeCompare(b.candidate.recommendationId);
+    });
+    if (sorted.length === 1) {
+      bandRankByRecommendationId.set(sorted[0]!.candidate.recommendationId, 0.5);
+      continue;
+    }
+    const denom = sorted.length - 1;
+    for (let i = 0; i < sorted.length; i++) {
+      bandRankByRecommendationId.set(sorted[i]!.candidate.recommendationId, i / denom);
+    }
+  }
+
+  return scoredBase.map((s) => {
+    const rank = bandRankByRecommendationId.get(s.candidate.recommendationId) ?? 0.5;
+    const signal = bandSignal[s.priceBand];
+    const finalScore = clamp01((wBand * signal + wRank * rank) / wNorm);
+    return {
+      ...s,
+      bandRankScore: rank,
+      bandSignal: signal,
+      score: finalScore,
     };
   });
 }

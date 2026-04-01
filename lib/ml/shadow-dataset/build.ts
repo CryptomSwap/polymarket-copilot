@@ -37,6 +37,54 @@ function toStr(n: number | null | undefined): string | null {
   return String(n);
 }
 
+function parseMetadataRecommendationId(metadataJson: string | null): string | null {
+  if (!metadataJson) return null;
+  try {
+    const obj = JSON.parse(metadataJson) as Record<string, unknown>;
+    if (typeof obj.recommendationId === "string" && obj.recommendationId.trim()) return obj.recommendationId.trim();
+    const oa = obj.openAttribution as Record<string, unknown> | undefined;
+    if (oa && typeof oa.recommendationId === "string" && oa.recommendationId.trim()) return oa.recommendationId.trim();
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function resolveStrictPaperTradeLabel(
+  row: ShadowTrainingRow,
+  maxJoinLagMs: number
+): Promise<{ markout12h: string | null; labelGoodDecision12h: boolean | null }> {
+  if (!row.recommendationId || !row.assetId || !row.side) return { markout12h: null, labelGoodDecision12h: null };
+  const from = new Date(row.createdAt.getTime() - maxJoinLagMs);
+  const to = new Date(row.createdAt.getTime() + maxJoinLagMs);
+  const candidates = await prisma.paperTrade.findMany({
+    where: {
+      assetId: row.assetId,
+      side: row.side,
+      entryTime: { gte: from, lte: to },
+      markout12h: { not: null },
+    },
+    orderBy: [{ entryTime: "asc" }, { id: "asc" }],
+    select: {
+      metadataJson: true,
+      markout12h: true,
+      entryTime: true,
+    },
+    take: 100,
+  });
+  const strict = candidates
+    .filter((p) => parseMetadataRecommendationId(p.metadataJson) === row.recommendationId)
+    .sort((a, b) => Math.abs(a.entryTime.getTime() - row.createdAt.getTime()) - Math.abs(b.entryTime.getTime() - row.createdAt.getTime()));
+  const best = strict[0];
+  if (!best?.markout12h) return { markout12h: null, labelGoodDecision12h: null };
+  const m12 = parseNum(best.markout12h);
+  if (m12 == null) return { markout12h: null, labelGoodDecision12h: null };
+  return {
+    markout12h: String(m12),
+    labelGoodDecision12h: deriveGoodDecisionLabelFromMarkout(row.wasBlocked, m12),
+  };
+}
+
 /**
  * Markout-based good-decision label (short horizons):
  * - favorable markout (>0): good if allowed, bad if blocked (missed opportunity)
@@ -516,7 +564,7 @@ export async function buildShadowTrainingExamples(
 export async function persistShadowTrainingExamples(
   options: PersistShadowTrainingExamplesOptions = {}
 ): Promise<PersistShadowTrainingExamplesResult> {
-  const { dryRun = false } = options;
+  const { dryRun = false, strictPaperLabelJoin = true, strictPaperJoinMaxLagMs = 60 * 60 * 1000 } = options;
   const { rows, examplesSkipped, errors } = await buildShadowTrainingExamples(options);
 
   let persisted = 0;
@@ -582,9 +630,14 @@ export async function persistShadowTrainingExamples(
           );
           let markout12h: string | null = null;
           let labelGoodDecision12h: boolean | null = null;
+          if (strictPaperLabelJoin) {
+            const strict = await resolveStrictPaperTradeLabel(row, strictPaperJoinMaxLagMs);
+            markout12h = strict.markout12h;
+            labelGoodDecision12h = strict.labelGoodDecision12h;
+          }
           const existingRow = existingByShadowCandidateId.get(row.shadowCandidateId);
           const existingMarkout12hNum = parseNum(existingRow?.markout12h ?? null);
-          if (existingMarkout12hNum != null) {
+          if (markout12h == null && existingMarkout12hNum != null) {
             markout12h = String(existingMarkout12hNum);
             labelGoodDecision12h = deriveGoodDecisionLabelFromMarkout(
               row.wasBlocked,

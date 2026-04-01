@@ -338,6 +338,58 @@ export interface GetSubmittedShadowCandidatesForTickOptions {
   lookbackMinutes?: number;
 }
 
+/** Upstream candidate breadth after price-bias expansion (read-only telemetry). */
+export interface ShadowExpansionBreadthDiagnostics {
+  expansionTarget: number;
+  expansionMax: number;
+  /** 0 = no per-market limit during expansion pulls (legacy slice behavior). */
+  perMarketCap: number;
+  beforePriceBiasCount: number;
+  afterPriceBiasCount: number;
+  uniqueRecommendationIds: number;
+  uniqueMarketIds: number;
+  uniqueAssetSidePairs: number;
+  /** Unique market count per V2-style shadow price band (entry-intended price). */
+  uniqueMarketsByShadowBand: Record<string, number>;
+}
+
+/**
+ * After mid-range expansion: optional cap on share/count of extreme-band candidates (<0.1 or >=0.9 entry price).
+ * Disabled when both env knobs are unset (reversible default).
+ */
+export interface ShadowExtremeBandCapDiagnostics {
+  enabled: boolean;
+  maxShareEnv: number | null;
+  maxCountEnv: number | null;
+  totalBefore: number;
+  totalAfter: number;
+  /** Effective ceiling on extreme-band rows kept (min of share floor and count cap). */
+  maxExtremeAllowed: number;
+  /** Counts by `shadowPriceBandForDiagnostics` label. */
+  selectedCountByBandBefore: Record<string, number>;
+  selectedCountByBandAfter: Record<string, number>;
+  extremeCountBefore: number;
+  extremeCountAfter: number;
+  extremeDroppedByCap: number;
+}
+
+/**
+ * Final post-dedupe selection bias (after extreme-band cap): constrain low-extreme (<0.1) share/count
+ * and preserve/promote mid bands when available.
+ */
+export interface ShadowFinalSelectionBiasDiagnostics {
+  enabled: boolean;
+  lowExtremeMaxShareEnv: number | null;
+  lowExtremeMaxCountEnv: number | null;
+  midBandMinCountEnv: number | null;
+  selectedCountByBandBeforeFinalBias: Record<string, number>;
+  selectedCountByBandAfterFinalBias: Record<string, number>;
+  lowExtremeDroppedByFinalBias: number;
+  midBandReservedOrPromoted: number;
+  lowExtremeCountBefore: number;
+  lowExtremeCountAfter: number;
+}
+
 export interface ShadowTickLoadDiagnostics {
   shadowRowsQueried: number;
   shadowRowsSkippedNoMarket: number;
@@ -358,6 +410,21 @@ export interface ShadowTickLoadDiagnostics {
   extendedLookbackTriedMinutes?: number | null;
   /** Recent submitters in the widened window (diagnostics). */
   topSubmittersByCount?: { funderAddress: string; count: number }[];
+  /** Present after mid-range price bias + expansion (pre–profile / pre-V2). */
+  expansionBreadth?: ShadowExpansionBreadthDiagnostics;
+  /** Present after optional extreme-band cap (still pre–profile / pre-V2). */
+  extremeBandCap?: ShadowExtremeBandCapDiagnostics;
+  /** Present after final selection bias (still pre–profile / pre-V2). */
+  finalSelectionBias?: ShadowFinalSelectionBiasDiagnostics;
+  /** Dedupe winner choice diagnostics (raw->dedup stage). */
+  dedupeWinnerChoice?: {
+    enabled: boolean;
+    keysEvaluated: number;
+    keysWinnerChanged: number;
+    currentWinnerBandCounts: Record<string, number>;
+    preferredWinnerBandCounts: Record<string, number>;
+    changedKeysSample?: { dedupeKey: string; currentWinnerBand: string; preferredWinnerBand: string }[];
+  };
 }
 
 /** Normalize tick/API funder hint: empty or legacy "paper" → auto-pick from ShadowCandidate activity. */
@@ -380,6 +447,380 @@ function parsePriceBoundEnv(key: string, fallback: number): number {
   const n = parseFloat(raw);
   if (!Number.isFinite(n)) return fallback;
   return n;
+}
+
+/** Matches `classifyShadowBand` in engine_v2_minimal (entry-intended price → overlay band labels). */
+function shadowPriceBandForDiagnostics(entryPrice: string | null | undefined): string {
+  const p = parseEntryPrice(entryPrice);
+  if (p == null) return "0.4-0.6";
+  if (p < 0.1) return "<0.1";
+  if (p < 0.2) return "0.1-0.2";
+  if (p < 0.3) return "0.2-0.3";
+  if (p < 0.4) return "0.3-0.4";
+  if (p < 0.6) return "0.4-0.6";
+  if (p < 0.8) return "0.6-0.8";
+  if (p < 0.9) return "0.8-0.9";
+  return ">=0.9";
+}
+
+function computeExpansionBreadthDiagnostics(
+  filtered: PaperTradingCandidate[],
+  beforeCount: number,
+  expansionTarget: number,
+  expansionMax: number,
+  perMarketCap: number
+): ShadowExpansionBreadthDiagnostics {
+  const uniqueMarketsByShadowBand: Record<string, number> = {};
+  const bandMarketSets = new Map<string, Set<string>>();
+  for (const c of filtered) {
+    const b = shadowPriceBandForDiagnostics(c.entryPrice);
+    let s = bandMarketSets.get(b);
+    if (!s) {
+      s = new Set();
+      bandMarketSets.set(b, s);
+    }
+    s.add(c.marketId);
+  }
+  for (const [b, s] of bandMarketSets) uniqueMarketsByShadowBand[b] = s.size;
+
+  return {
+    expansionTarget,
+    expansionMax,
+    perMarketCap,
+    beforePriceBiasCount: beforeCount,
+    afterPriceBiasCount: filtered.length,
+    uniqueRecommendationIds: new Set(filtered.map((c) => c.recommendationId)).size,
+    uniqueMarketIds: new Set(filtered.map((c) => c.marketId)).size,
+    uniqueAssetSidePairs: new Set(filtered.map((c) => `${c.assetId}|${c.side}`)).size,
+    uniqueMarketsByShadowBand,
+  };
+}
+
+/**
+ * Take up to `need` candidates in list order; skip ids already in `selectedIds`.
+ * When `perMarketCap` > 0, at most that many selections per marketId (updates `marketTally`).
+ * When `perMarketCap` <= 0, only id-uniqueness applies (legacy slice semantics).
+ */
+function takeWithPerMarketCapExcluding(
+  queue: PaperTradingCandidate[],
+  need: number,
+  perMarketCap: number,
+  marketTally: Map<string, number>,
+  selectedIds: Set<string>
+): PaperTradingCandidate[] {
+  if (need <= 0) return [];
+  const out: PaperTradingCandidate[] = [];
+  for (const c of queue) {
+    if (out.length >= need) break;
+    const id = c.shadowCandidateId ?? c.recommendationId;
+    if (selectedIds.has(id)) continue;
+    if (perMarketCap > 0) {
+      const cur = marketTally.get(c.marketId) ?? 0;
+      if (cur >= perMarketCap) continue;
+      marketTally.set(c.marketId, cur + 1);
+    }
+    selectedIds.add(id);
+    out.push(c);
+  }
+  return out;
+}
+
+function parsePaperShadowExpansionTarget(fallback: number): number {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_SHADOW_CANDIDATE_EXPANSION_TARGET?.trim() : "";
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : fallback;
+}
+
+function parsePaperShadowExpansionMax(target: number, fallback: number): number {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_SHADOW_CANDIDATE_EXPANSION_MAX?.trim() : "";
+  if (!raw) return Math.max(target, fallback);
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? Math.max(n, target) : Math.max(target, fallback);
+}
+
+function parsePaperShadowExpansionPerMarketCap(fallback: number): number {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_SHADOW_EXPANSION_PER_MARKET_CAP?.trim() : "";
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** 0–1 share cap on extreme-band rows in the final loader selection; unset = no share limit. */
+function parsePaperShadowExtremeBandMaxShare(): number | null {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_SHADOW_EXTREME_BAND_MAX_SHARE?.trim() : "";
+  if (!raw) return null;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return null;
+  return n;
+}
+
+/** Hard cap on count of extreme-band rows kept; unset = no count limit. */
+function parsePaperShadowExtremeBandMaxCount(): number | null {
+  const raw = typeof process !== "undefined" ? process.env.PAPER_SHADOW_EXTREME_BAND_MAX_COUNT?.trim() : "";
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** 0–1 share cap for final selected low-extreme rows (<0.1). */
+function parsePaperShadowLowExtremeMaxShare(): number | null {
+  const raw =
+    typeof process !== "undefined" ? process.env.PAPER_SHADOW_LOW_EXTREME_MAX_SHARE?.trim() : "";
+  if (!raw) return null;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return null;
+  return n;
+}
+
+/** Hard count cap for final selected low-extreme rows (<0.1). */
+function parsePaperShadowLowExtremeMaxCount(): number | null {
+  const raw =
+    typeof process !== "undefined" ? process.env.PAPER_SHADOW_LOW_EXTREME_MAX_COUNT?.trim() : "";
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** Soft minimum for final selected mid-band rows (0.2-0.3, 0.4-0.6, 0.6-0.8). */
+function parsePaperShadowMidBandMinCount(): number | null {
+  const raw =
+    typeof process !== "undefined" ? process.env.PAPER_SHADOW_MID_BAND_MIN_COUNT?.trim() : "";
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function dedupeBandLabel(entryPrice: string | null | undefined): string {
+  const p = parseEntryPrice(entryPrice);
+  if (p == null) return "unknown";
+  if (p < 0.1) return "<0.1";
+  if (p < 0.2) return "0.1-0.2";
+  if (p < 0.3) return "0.2-0.3";
+  if (p < 0.4) return "0.3-0.4";
+  if (p < 0.6) return "0.4-0.6";
+  if (p < 0.8) return "0.6-0.8";
+  if (p < 0.9) return "0.8-0.9";
+  return ">=0.9";
+}
+
+function shouldPreferGoodBandsForDedupeWinner(): boolean {
+  return (typeof process !== "undefined" ? process.env.PAPER_SHADOW_DEDUPE_PREFER_GOOD_BANDS : "") === "1";
+}
+
+function isExtremeShadowEntryPrice(entryPrice: string | null | undefined): boolean {
+  const p = parseEntryPrice(entryPrice);
+  if (p == null) return false;
+  return p < 0.1 || p >= 0.9;
+}
+
+function isLowExtremeShadowEntryPrice(entryPrice: string | null | undefined): boolean {
+  const p = parseEntryPrice(entryPrice);
+  if (p == null) return false;
+  return p < 0.1;
+}
+
+function isMidBandShadowEntryPrice(entryPrice: string | null | undefined): boolean {
+  const p = parseEntryPrice(entryPrice);
+  if (p == null) return false;
+  return (p >= 0.2 && p < 0.3) || (p >= 0.4 && p < 0.6) || (p >= 0.6 && p < 0.8);
+}
+
+function countSelectedByDiagnosticsBand(candidates: PaperTradingCandidate[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const c of candidates) {
+    const b = shadowPriceBandForDiagnostics(c.entryPrice);
+    out[b] = (out[b] ?? 0) + 1;
+  }
+  return out;
+}
+
+function countExtremeCandidates(candidates: PaperTradingCandidate[]): number {
+  let n = 0;
+  for (const c of candidates) {
+    if (isExtremeShadowEntryPrice(c.entryPrice)) n++;
+  }
+  return n;
+}
+
+function countLowExtremeCandidates(candidates: PaperTradingCandidate[]): number {
+  let n = 0;
+  for (const c of candidates) {
+    if (isLowExtremeShadowEntryPrice(c.entryPrice)) n++;
+  }
+  return n;
+}
+
+function countMidBandCandidates(candidates: PaperTradingCandidate[]): number {
+  let n = 0;
+  for (const c of candidates) {
+    if (isMidBandShadowEntryPrice(c.entryPrice)) n++;
+  }
+  return n;
+}
+
+/**
+ * Preserves list order and mid-band priority: never drops non-extreme rows; drops excess extremes from the tail of the extreme sequence in list order.
+ */
+function applyExtremeBandCandidateCap(
+  ordered: PaperTradingCandidate[],
+  maxShare: number | null,
+  maxCount: number | null
+): { capped: PaperTradingCandidate[]; diagnostics: ShadowExtremeBandCapDiagnostics } {
+  const beforeBands = countSelectedByDiagnosticsBand(ordered);
+  const extremeBefore = countExtremeCandidates(ordered);
+  const maxShareEnv = maxShare;
+  const maxCountEnv = maxCount;
+  const enabled = maxShare != null || maxCount != null;
+
+  if (!enabled) {
+    return {
+      capped: ordered,
+      diagnostics: {
+        enabled: false,
+        maxShareEnv: null,
+        maxCountEnv: null,
+        totalBefore: ordered.length,
+        totalAfter: ordered.length,
+        maxExtremeAllowed: extremeBefore,
+        selectedCountByBandBefore: beforeBands,
+        selectedCountByBandAfter: { ...beforeBands },
+        extremeCountBefore: extremeBefore,
+        extremeCountAfter: extremeBefore,
+        extremeDroppedByCap: 0,
+      },
+    };
+  }
+
+  const n = ordered.length;
+  const limitFromShare = maxShare != null ? Math.floor(n * maxShare) : Number.POSITIVE_INFINITY;
+  const limitFromCount = maxCount != null ? maxCount : Number.POSITIVE_INFINITY;
+  const maxExtremeAllowed = Math.max(0, Math.min(limitFromShare, limitFromCount));
+
+  let extremeKept = 0;
+  const capped: PaperTradingCandidate[] = [];
+  for (const c of ordered) {
+    if (!isExtremeShadowEntryPrice(c.entryPrice)) {
+      capped.push(c);
+      continue;
+    }
+    if (extremeKept < maxExtremeAllowed) {
+      extremeKept++;
+      capped.push(c);
+    }
+  }
+
+  const extremeAfter = countExtremeCandidates(capped);
+  return {
+    capped,
+    diagnostics: {
+      enabled: true,
+      maxShareEnv,
+      maxCountEnv,
+      totalBefore: n,
+      totalAfter: capped.length,
+      maxExtremeAllowed,
+      selectedCountByBandBefore: beforeBands,
+      selectedCountByBandAfter: countSelectedByDiagnosticsBand(capped),
+      extremeCountBefore: extremeBefore,
+      extremeCountAfter: extremeAfter,
+      extremeDroppedByCap: extremeBefore - extremeAfter,
+    },
+  };
+}
+
+/**
+ * Final post-dedupe bias: keep order as much as possible, cap low-extreme (<0.1), and reserve/promote
+ * mid bands when available. If no non-low rows exist, fallback keeps one low row to avoid empty output.
+ */
+function applyFinalSelectionLowExtremeBias(
+  ordered: PaperTradingCandidate[],
+  lowExtremeMaxShare: number | null,
+  lowExtremeMaxCount: number | null,
+  midBandMinCount: number | null
+): { biased: PaperTradingCandidate[]; diagnostics: ShadowFinalSelectionBiasDiagnostics } {
+  const beforeBands = countSelectedByDiagnosticsBand(ordered);
+  const lowBefore = countLowExtremeCandidates(ordered);
+  const midBefore = countMidBandCandidates(ordered);
+  const enabled = lowExtremeMaxShare != null || lowExtremeMaxCount != null || midBandMinCount != null;
+
+  if (!enabled) {
+    return {
+      biased: ordered,
+      diagnostics: {
+        enabled: false,
+        lowExtremeMaxShareEnv: null,
+        lowExtremeMaxCountEnv: null,
+        midBandMinCountEnv: null,
+        selectedCountByBandBeforeFinalBias: beforeBands,
+        selectedCountByBandAfterFinalBias: { ...beforeBands },
+        lowExtremeDroppedByFinalBias: 0,
+        midBandReservedOrPromoted: 0,
+        lowExtremeCountBefore: lowBefore,
+        lowExtremeCountAfter: lowBefore,
+      },
+    };
+  }
+
+  const n = ordered.length;
+  const capShare = lowExtremeMaxShare != null ? Math.floor(n * lowExtremeMaxShare) : Number.POSITIVE_INFINITY;
+  const capCount = lowExtremeMaxCount != null ? lowExtremeMaxCount : Number.POSITIVE_INFINITY;
+  const lowCap = Math.max(0, Math.min(capShare, capCount));
+  const midMin = Math.max(0, midBandMinCount ?? 0);
+
+  const kept: PaperTradingCandidate[] = [];
+  const skippedLow: PaperTradingCandidate[] = [];
+  let lowKept = 0;
+  let midKept = 0;
+  for (const c of ordered) {
+    if (isLowExtremeShadowEntryPrice(c.entryPrice)) {
+      if (lowKept < lowCap) {
+        kept.push(c);
+        lowKept++;
+      } else {
+        skippedLow.push(c);
+      }
+      continue;
+    }
+    kept.push(c);
+    if (isMidBandShadowEntryPrice(c.entryPrice)) midKept++;
+  }
+
+  let promoted = 0;
+  if (midMin > 0 && midKept < midMin) {
+    const seen = new Set(kept.map((c) => c.shadowCandidateId ?? c.recommendationId));
+    const missing = midMin - midKept;
+    for (const c of ordered) {
+      if (promoted >= missing) break;
+      if (!isMidBandShadowEntryPrice(c.entryPrice)) continue;
+      const id = c.shadowCandidateId ?? c.recommendationId;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      kept.push(c);
+      promoted++;
+    }
+  }
+
+  if (kept.length === 0 && skippedLow.length > 0) {
+    kept.push(skippedLow[0]!);
+  }
+
+  const lowAfter = countLowExtremeCandidates(kept);
+  return {
+    biased: kept,
+    diagnostics: {
+      enabled: true,
+      lowExtremeMaxShareEnv: lowExtremeMaxShare,
+      lowExtremeMaxCountEnv: lowExtremeMaxCount,
+      midBandMinCountEnv: midBandMinCount,
+      selectedCountByBandBeforeFinalBias: beforeBands,
+      selectedCountByBandAfterFinalBias: countSelectedByDiagnosticsBand(kept),
+      lowExtremeDroppedByFinalBias: lowBefore - lowAfter,
+      midBandReservedOrPromoted: promoted,
+      lowExtremeCountBefore: lowBefore,
+      lowExtremeCountAfter: lowAfter,
+    },
+  };
 }
 
 async function findTopRuntimeShadowSubmitters(
@@ -481,43 +922,98 @@ export async function loadShadowCandidatesForPaperTick(
     const highDeprioritized = byBand["0.8-0.9"];
     const tailHigh = byBand[">=0.9"];
 
-    const selected = [...primary];
-    // Exploration: include 0.3-0.6 but cap relative to primary (downweighted by cap).
+    const expansionThreshold = parsePaperShadowExpansionTarget(36);
+    const expansionMax = parsePaperShadowExpansionMax(expansionThreshold, 80);
+    const perMarketCap = parsePaperShadowExpansionPerMarketCap(3);
+
+    const marketTally = new Map<string, number>();
+    const selectedIds = new Set<string>();
+    const selected: PaperTradingCandidate[] = [];
+
+    for (const c of primary) {
+      const id = c.shadowCandidateId ?? c.recommendationId;
+      selected.push(c);
+      selectedIds.add(id);
+      marketTally.set(c.marketId, (marketTally.get(c.marketId) ?? 0) + 1);
+    }
+
     const secondaryCap = Math.max(2, Math.floor(primary.length * 0.5));
-    selected.push(...secondary.slice(0, secondaryCap));
+    selected.push(
+      ...takeWithPerMarketCapExcluding(secondary, secondaryCap, perMarketCap, marketTally, selectedIds)
+    );
 
-    const expansionThreshold = 10;
     if (selected.length < expansionThreshold && beforeCount > 0) {
-      // Adaptive widening with low-price-first priority.
       const need = expansionThreshold - selected.length;
-      selected.push(...lowerExploration.slice(0, need));
+      selected.push(
+        ...takeWithPerMarketCapExcluding(lowerExploration, need, perMarketCap, marketTally, selectedIds)
+      );
     }
     if (selected.length < expansionThreshold && beforeCount > 0) {
       const need = expansionThreshold - selected.length;
-      selected.push(...secondary.slice(secondaryCap, secondaryCap + need));
+      selected.push(...takeWithPerMarketCapExcluding(secondary, need, perMarketCap, marketTally, selectedIds));
     }
     if (selected.length < expansionThreshold && beforeCount > 0) {
       const need = expansionThreshold - selected.length;
-      selected.push(...midHigh.slice(0, need));
+      selected.push(...takeWithPerMarketCapExcluding(midHigh, need, perMarketCap, marketTally, selectedIds));
     }
     if (selected.length < expansionThreshold && beforeCount > 0) {
       const need = expansionThreshold - selected.length;
-      // 0.8-0.9 is heavily deprioritized: include at most 1 only as last-resort expansion.
-      selected.push(...highDeprioritized.slice(0, Math.min(1, need)));
+      selected.push(
+        ...takeWithPerMarketCapExcluding(
+          highDeprioritized,
+          Math.min(1, need),
+          perMarketCap,
+          marketTally,
+          selectedIds
+        )
+      );
     }
     if (selected.length < expansionThreshold && beforeCount > 0) {
       const need = expansionThreshold - selected.length;
-      selected.push(...tailHigh.slice(0, need));
+      selected.push(...takeWithPerMarketCapExcluding(tailHigh, need, perMarketCap, marketTally, selectedIds));
     }
 
-    // De-dup if any band spillover appended same row (safety).
     const seenIds = new Set<string>();
-    const filtered = selected.filter((c) => {
+    let filtered = selected.filter((c) => {
       const id = c.shadowCandidateId ?? c.recommendationId;
       if (seenIds.has(id)) return false;
       seenIds.add(id);
       return true;
     });
+
+    let trimmedForMax = false;
+    if (filtered.length > expansionMax) {
+      filtered = filtered.slice(0, expansionMax);
+      trimmedForMax = true;
+    }
+
+    const extremeShareEnv = parsePaperShadowExtremeBandMaxShare();
+    const extremeCountEnv = parsePaperShadowExtremeBandMaxCount();
+    const { capped: afterExtremeCap, diagnostics: extremeBandCap } = applyExtremeBandCandidateCap(
+      filtered,
+      extremeShareEnv,
+      extremeCountEnv
+    );
+    filtered = afterExtremeCap;
+    const lowExtremeMaxShareEnv = parsePaperShadowLowExtremeMaxShare();
+    const lowExtremeMaxCountEnv = parsePaperShadowLowExtremeMaxCount();
+    const midBandMinCountEnv = parsePaperShadowMidBandMinCount();
+    const { biased: afterFinalSelectionBias, diagnostics: finalSelectionBias } =
+      applyFinalSelectionLowExtremeBias(
+        filtered,
+        lowExtremeMaxShareEnv,
+        lowExtremeMaxCountEnv,
+        midBandMinCountEnv
+      );
+    filtered = afterFinalSelectionBias;
+
+    const expansionBreadth = computeExpansionBreadthDiagnostics(
+      filtered,
+      beforeCount,
+      expansionThreshold,
+      expansionMax,
+      perMarketCap
+    );
 
     console.info("[paper-trading] candidate price-band bias", {
       phase: "before_filter",
@@ -532,6 +1028,19 @@ export async function loadShadowCandidatesForPaperTick(
       secondaryBand: "0.3-0.6 (capped exploration)",
       deprioritizedBand: "0.8-0.9 (last-resort cap<=1)",
       adaptiveExpansion: "low-first: <0.1 -> extra 0.3-0.6 -> 0.6-0.8 -> 0.8-0.9 -> >=0.9",
+      expansionTarget: expansionThreshold,
+      expansionMax,
+      perMarketCap,
+      trimmedToExpansionMax: trimmedForMax,
+      expansionBreadth,
+    });
+    console.info("[paper-trading] extreme-band cap (upstream loader)", {
+      phase: "after_extreme_band_cap",
+      ...extremeBandCap,
+    });
+    console.info("[paper-trading] final selection bias (low extreme vs mid)", {
+      phase: "after_final_selection_bias",
+      ...finalSelectionBias,
     });
 
     return {
@@ -540,6 +1049,9 @@ export async function loadShadowCandidatesForPaperTick(
         ...payload.shadowDiagnostics,
         candidatesLoaded: filtered.length,
         candidateIds: filtered.map((c) => c.shadowCandidateId!).filter(Boolean),
+        expansionBreadth,
+        extremeBandCap,
+        finalSelectionBias,
         zeroCandidatesReason:
           filtered.length === 0 && beforeCount > 0
             ? "price_low_probability_bias_filter_removed_all"
@@ -693,8 +1205,7 @@ export async function getSubmittedShadowCandidatesForTickWithDiagnostics(
     return { candidates: [], shadowDiagnostics: diag };
   }
 
-  const seen = new Set<string>();
-  const deduped: typeof rows = [];
+  const groupsByKey = new Map<string, typeof rows>();
   for (const r of rows) {
     const mid = resolvedMarketIdForShadowRow(r);
     if (!mid) {
@@ -703,13 +1214,56 @@ export async function getSubmittedShadowCandidatesForTickWithDiagnostics(
     }
     const side = r.side.toUpperCase() === "SELL" ? "SELL" : "BUY";
     const k = dedupeKeyMarketSide(mid, side);
-    if (seen.has(k)) {
-      diag.dedupeDroppedCount++;
-      continue;
-    }
-    seen.add(k);
-    deduped.push(r);
+    const arr = groupsByKey.get(k) ?? [];
+    arr.push(r);
+    groupsByKey.set(k, arr);
   }
+
+  const preferGoodBandWinner = shouldPreferGoodBandsForDedupeWinner();
+  const deduped: typeof rows = [];
+  const currentWinnerBandCounts = new Map<string, number>();
+  const preferredWinnerBandCounts = new Map<string, number>();
+  const changedKeysSample: { dedupeKey: string; currentWinnerBand: string; preferredWinnerBand: string }[] = [];
+  let keysWinnerChanged = 0;
+
+  for (const [k, group] of groupsByKey.entries()) {
+    if (!group.length) continue;
+    const currentWinner = group[0]!;
+    const currentBand = dedupeBandLabel(currentWinner.intendedPrice);
+    currentWinnerBandCounts.set(currentBand, (currentWinnerBandCounts.get(currentBand) ?? 0) + 1);
+
+    let chosen = currentWinner;
+    if (preferGoodBandWinner) {
+      const preferredWinner =
+        group.find((r) => dedupeBandLabel(r.intendedPrice) === "0.2-0.3") ??
+        group.find((r) => dedupeBandLabel(r.intendedPrice) === "0.4-0.6") ??
+        currentWinner;
+      chosen = preferredWinner;
+      if (preferredWinner.id !== currentWinner.id) {
+        keysWinnerChanged++;
+        if (changedKeysSample.length < 40) {
+          changedKeysSample.push({
+            dedupeKey: k,
+            currentWinnerBand: currentBand,
+            preferredWinnerBand: dedupeBandLabel(preferredWinner.intendedPrice),
+          });
+        }
+      }
+    }
+    const chosenBand = dedupeBandLabel(chosen.intendedPrice);
+    preferredWinnerBandCounts.set(chosenBand, (preferredWinnerBandCounts.get(chosenBand) ?? 0) + 1);
+    deduped.push(chosen);
+    diag.dedupeDroppedCount += Math.max(0, group.length - 1);
+  }
+
+  diag.dedupeWinnerChoice = {
+    enabled: preferGoodBandWinner,
+    keysEvaluated: groupsByKey.size,
+    keysWinnerChanged,
+    currentWinnerBandCounts: Object.fromEntries(currentWinnerBandCounts.entries()),
+    preferredWinnerBandCounts: Object.fromEntries(preferredWinnerBandCounts.entries()),
+    ...(changedKeysSample.length > 0 ? { changedKeysSample } : {}),
+  };
 
   const marketIds = Array.from(new Set(deduped.map((r) => resolvedMarketIdForShadowRow(r)!).filter(Boolean)));
   const assets = await prisma.syncedAsset.findMany({
@@ -961,6 +1515,10 @@ export interface PaperTradingLoadDiagnostics {
   shadowUsedFunderFallback?: boolean;
   shadowExtendedLookbackTriedMinutes?: number;
   shadowTopSubmittersByCount?: { funderAddress: string; count: number }[];
+  shadowExpansionBreadth?: ShadowExpansionBreadthDiagnostics;
+  shadowExtremeBandCap?: ShadowExtremeBandCapDiagnostics;
+  shadowFinalSelectionBias?: ShadowFinalSelectionBiasDiagnostics;
+  shadowDedupeWinnerChoice?: ShadowTickLoadDiagnostics["dedupeWinnerChoice"];
 }
 
 /** Map shadow tick diagnostics to PaperTradingLoadDiagnostics (no profile filter). */
@@ -1016,6 +1574,10 @@ export function mergeShadowDiagnosticsIntoLoadDiagnostics(
     shadowUsedFunderFallback: shadow.usedFunderFallback,
     shadowExtendedLookbackTriedMinutes: shadow.extendedLookbackTriedMinutes ?? undefined,
     shadowTopSubmittersByCount: shadow.topSubmittersByCount,
+    shadowExpansionBreadth: shadow.expansionBreadth,
+    shadowExtremeBandCap: shadow.extremeBandCap,
+    shadowFinalSelectionBias: shadow.finalSelectionBias,
+    shadowDedupeWinnerChoice: shadow.dedupeWinnerChoice,
   };
 }
 

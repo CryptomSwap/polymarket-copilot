@@ -13,6 +13,19 @@ import type { ShadowTargetLabel, TrainShadowOptions, TrainShadowResult } from ".
 /** Model type for shadow-trained runs; recommendation ML uses "logistic_regression". */
 export const SHADOW_MODEL_TYPE = "logistic_regression_shadow";
 
+function parseMetadataRecommendationId(metadataJson: string | null): string | null {
+  if (!metadataJson) return null;
+  try {
+    const obj = JSON.parse(metadataJson) as Record<string, unknown>;
+    if (typeof obj.recommendationId === "string" && obj.recommendationId.trim()) return obj.recommendationId.trim();
+    const oa = obj.openAttribution as Record<string, unknown> | undefined;
+    if (oa && typeof oa.recommendationId === "string" && oa.recommendationId.trim()) return oa.recommendationId.trim();
+  } catch {
+    // ignore malformed metadata
+  }
+  return null;
+}
+
 function variance(values: number[]): number {
   if (values.length <= 1) return 0;
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
@@ -125,6 +138,70 @@ export async function trainShadowModel(
   const trainRows = valid.slice(0, splitIdx);
   const valRows = valid.slice(splitIdx);
 
+  const minCreatedAt = valid[0]?.createdAt ?? null;
+  const maxCreatedAt = valid[valid.length - 1]?.createdAt ?? null;
+  const strictJoinLagMs = 60 * 60 * 1000;
+  const paperRows =
+    minCreatedAt && maxCreatedAt
+      ? await prisma.paperTrade.findMany({
+          where: {
+            entryTime: {
+              gte: new Date(minCreatedAt.getTime() - strictJoinLagMs),
+              lte: new Date(maxCreatedAt.getTime() + strictJoinLagMs),
+            },
+          },
+          orderBy: [{ entryTime: "asc" }, { id: "asc" }],
+          select: {
+            metadataJson: true,
+            assetId: true,
+            side: true,
+            entryTime: true,
+            score: true,
+            threshold: true,
+            botType: true,
+            entryPriceBand: true,
+            entryPrice: true,
+          },
+        })
+      : [];
+
+  const paperByRecAssetSide = new Map<string, typeof paperRows>();
+  for (const p of paperRows) {
+    const recId = parseMetadataRecommendationId(p.metadataJson);
+    if (!recId) continue;
+    const k = `${recId}|${p.assetId}|${p.side}`;
+    const arr = paperByRecAssetSide.get(k) ?? [];
+    arr.push(p);
+    paperByRecAssetSide.set(k, arr);
+  }
+
+  function paperContextForRow(r: (typeof valid)[0]): {
+    scoreThresholdGap?: number;
+    botType?: string | null;
+    entryPriceBand?: string | null;
+    probabilityBand?: string | null;
+  } {
+    if (!r.recommendationId) return {};
+    const k = `${r.recommendationId}|${r.assetId}|${r.side}`;
+    const options = paperByRecAssetSide.get(k) ?? [];
+    const hit =
+      options.find((p) => {
+        const dt = Math.abs(p.entryTime.getTime() - r.createdAt.getTime());
+        return dt <= strictJoinLagMs;
+      }) ?? null;
+    if (!hit) return {};
+    const gap = Number.isFinite(hit.score - hit.threshold) ? hit.score - hit.threshold : undefined;
+    const price = Number.isFinite(Number(hit.entryPrice)) ? Number(hit.entryPrice) : null;
+    const probabilityBand =
+      price == null ? null : price <= 0.2 ? "low" : price >= 0.8 ? "high" : "mid";
+    return {
+      scoreThresholdGap: gap,
+      botType: hit.botType ?? null,
+      entryPriceBand: hit.entryPriceBand ?? null,
+      probabilityBand,
+    };
+  }
+
   if (trainRows.length < 5 || valRows.length < 2) {
     return {
       success: false,
@@ -136,7 +213,9 @@ export async function trainShadowModel(
     };
   }
 
-  const toInput = (r: (typeof valid)[0]) => ({
+  const toInput = (r: (typeof valid)[0]) => {
+    const paperCtx = paperContextForRow(r);
+    return {
     policyState: r.policyState,
     sizeMultiplier: r.sizeMultiplier,
     finalSuggestedSize: r.finalSuggestedSize,
@@ -168,7 +247,12 @@ export async function trainShadowModel(
     distanceFromMid: (r as { distanceFromMid?: string | null }).distanceFromMid,
     timeToCloseHours: (r as { timeToCloseHours?: string | null }).timeToCloseHours,
     liquidityTrend: (r as { liquidityTrend?: string | null }).liquidityTrend,
-  });
+    scoreThresholdGap: paperCtx.scoreThresholdGap ?? null,
+    probabilityBand: paperCtx.probabilityBand ?? null,
+    entryPriceBand: paperCtx.entryPriceBand ?? null,
+    botType: paperCtx.botType ?? null,
+    };
+  };
 
   const XTrain = trainRows.map((r) => toShadowFeatureVector(toInput(r)));
   const yTrain = trainRows.map((r) => (r[targetLabel] === true ? 1 : 0));
