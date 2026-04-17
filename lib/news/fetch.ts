@@ -6,7 +6,7 @@ import Parser from "rss-parser";
 import { prisma } from "@/lib/db";
 import type { NormalizedFeedItem } from "./dedupe";
 import { dedupeHash } from "./dedupe";
-import { getEnabledSources } from "./sources";
+import { getEnabledSources, repairLegacyNewsSourceUrls } from "./sources";
 
 const parser = new Parser({
   timeout: 15000,
@@ -94,6 +94,7 @@ export async function fetchRssFeed(
  * Fetch all enabled RSS sources and return combined items.
  */
 export async function fetchAllEnabledSources(): Promise<FetchedItem[]> {
+  await repairLegacyNewsSourceUrls();
   const sources = await getEnabledSources();
   const all: FetchedItem[] = [];
   for (const s of sources) {

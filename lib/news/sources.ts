@@ -18,18 +18,136 @@ export interface NewsSourceRow {
 }
 
 const DEFAULT_SOURCES: Omit<NewsSourceRow, "id">[] = [
-  { name: "Reuters (World)", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://www.reutersagency.com/feed/", credibilityScore: 0.9, enabled: true },
-  { name: "AP Top News", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://feeds.ap.org/rss/topnews", credibilityScore: 0.9, enabled: true },
-  { name: "BBC World", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://feeds.bbci.co.uk/news/world/rss.xml", credibilityScore: 0.85, enabled: true },
-  { name: "Reuters Business", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://www.reutersagency.com/feed/?best-topics=business-finance", credibilityScore: 0.9, enabled: true },
-  { name: "Reuters Politics", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://www.reutersagency.com/feed/?best-topics=politics", credibilityScore: 0.9, enabled: true },
-  { name: "Reuters Markets", type: NEWS_SOURCE_TYPE_RSS, baseUrl: "https://www.reutersagency.com/feed/?best-topics=commodities-energy", credibilityScore: 0.9, enabled: true },
+  {
+    name: "NYT World",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    credibilityScore: 0.88,
+    enabled: true,
+  },
+  {
+    name: "NPR News",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://feeds.npr.org/1001/rss.xml",
+    credibilityScore: 0.86,
+    enabled: true,
+  },
+  {
+    name: "BBC World",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://feeds.bbci.co.uk/news/world/rss.xml",
+    credibilityScore: 0.85,
+    enabled: true,
+  },
+  {
+    name: "Guardian Business",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://www.theguardian.com/business/rss",
+    credibilityScore: 0.85,
+    enabled: true,
+  },
+  {
+    name: "Guardian Politics",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://www.theguardian.com/politics/rss",
+    credibilityScore: 0.85,
+    enabled: true,
+  },
+  {
+    name: "FT Markets",
+    type: NEWS_SOURCE_TYPE_RSS,
+    baseUrl: "https://www.ft.com/markets?format=rss",
+    credibilityScore: 0.82,
+    enabled: true,
+  },
 ];
+
+/** `reutersagency.com` feeds return 404; remap existing DB rows idempotently. */
+const LEGACY_SOURCE_REPAIRS: Array<{
+  legacyUrl: string;
+  name: string;
+  baseUrl: string;
+  credibilityScore: number;
+}> = [
+  {
+    legacyUrl: "https://www.reutersagency.com/feed/",
+    name: "NYT World",
+    baseUrl: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    credibilityScore: 0.88,
+  },
+  {
+    legacyUrl: "https://www.reutersagency.com/feed/?best-topics=business-finance",
+    name: "Guardian Business",
+    baseUrl: "https://www.theguardian.com/business/rss",
+    credibilityScore: 0.85,
+  },
+  {
+    legacyUrl: "https://www.reutersagency.com/feed/?best-topics=politics",
+    name: "Guardian Politics",
+    baseUrl: "https://www.theguardian.com/politics/rss",
+    credibilityScore: 0.85,
+  },
+  {
+    legacyUrl: "https://www.reutersagency.com/feed/?best-topics=commodities-energy",
+    name: "FT Markets",
+    baseUrl: "https://www.ft.com/markets?format=rss",
+    credibilityScore: 0.82,
+  },
+  {
+    legacyUrl: "https://reutersagency.com/feed/",
+    name: "NYT World",
+    baseUrl: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    credibilityScore: 0.88,
+  },
+  {
+    legacyUrl: "https://reutersagency.com/feed/?best-topics=business-finance",
+    name: "Guardian Business",
+    baseUrl: "https://www.theguardian.com/business/rss",
+    credibilityScore: 0.85,
+  },
+  {
+    legacyUrl: "https://reutersagency.com/feed/?best-topics=politics",
+    name: "Guardian Politics",
+    baseUrl: "https://www.theguardian.com/politics/rss",
+    credibilityScore: 0.85,
+  },
+  {
+    legacyUrl: "https://reutersagency.com/feed/?best-topics=commodities-energy",
+    name: "FT Markets",
+    baseUrl: "https://www.ft.com/markets?format=rss",
+    credibilityScore: 0.82,
+  },
+  {
+    legacyUrl: "https://feeds.ap.org/rss/topnews",
+    name: "NPR News",
+    baseUrl: "https://feeds.npr.org/1001/rss.xml",
+    credibilityScore: 0.86,
+  },
+];
+
+/**
+ * Patch DB rows that still point at broken reutersagency RSS URLs (404).
+ * Safe to call on every fetch; updates are no-ops when URLs already match.
+ */
+export async function repairLegacyNewsSourceUrls(): Promise<void> {
+  for (const r of LEGACY_SOURCE_REPAIRS) {
+    await prisma.newsSource.updateMany({
+      where: { baseUrl: r.legacyUrl },
+      data: {
+        name: r.name,
+        baseUrl: r.baseUrl,
+        credibilityScore: r.credibilityScore,
+        enabled: true,
+      },
+    });
+  }
+}
 
 /**
  * Ensure default news sources exist. Idempotent; creates only if none exist.
  */
 export async function ensureDefaultNewsSources(): Promise<NewsSourceRow[]> {
+  await repairLegacyNewsSourceUrls();
   const existing = await prisma.newsSource.count();
   if (existing > 0) {
     const list = await prisma.newsSource.findMany({ where: { enabled: true } });
@@ -70,7 +188,7 @@ export async function ensureDefaultNewsSources(): Promise<NewsSourceRow[]> {
  */
 export async function getEnabledSources(): Promise<NewsSourceRow[]> {
   const list = await prisma.newsSource.findMany({ where: { enabled: true } });
-  return list.map((s) => ({
+  const rows = list.map((s) => ({
     id: s.id,
     name: s.name,
     type: s.type,
@@ -78,4 +196,10 @@ export async function getEnabledSources(): Promise<NewsSourceRow[]> {
     credibilityScore: s.credibilityScore,
     enabled: s.enabled,
   }));
+  /** One fetch per URL (legacy repairs can leave duplicate rows). */
+  const byUrl = new Map<string, NewsSourceRow>();
+  for (const r of rows) {
+    if (!byUrl.has(r.baseUrl)) byUrl.set(r.baseUrl, r);
+  }
+  return Array.from(byUrl.values());
 }
